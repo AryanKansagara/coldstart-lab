@@ -2,7 +2,7 @@
 
 Replay a real request trace through a simulation of [Modal](https://modal.com)'s autoscaler and tune it before you deploy.
 
-**Live:** LIVE_URL
+**Live:** https://coldstart-lab.vercel.app
 
 ## The pain
 
