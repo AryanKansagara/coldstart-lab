@@ -134,7 +134,7 @@ function pickKey(keys: string[], wanted: string[]) {
 }
 
 function splitCsvLine(line: string, sep: string) {
-  // handles quoted fields without embedded separators/newlines; enough for log exports.
+  // Handles quoted fields without embedded separators/newlines; enough for log exports.
   return line.split(sep).map((c) => c.trim().replace(/^"|"$/g, ''))
 }
 
