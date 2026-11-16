@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { simulate, coldStartSec, percentile, sanitizeCfg, SNAPSHOT_SPEEDUP, type SimConfig } from './sim.ts'
-import { generate, parseTrace, rng, sanitizeSpec, MAX_REQUESTS, type Trace } from './traffic.ts'
+import { generate, parseTrace, rng, sanitizeSpec, splitCsvLine, MAX_REQUESTS, DECODE_TOK_PER_SEC, PREFILL_TOK_PER_SEC, LLM_OVERHEAD_SEC, type Trace } from './traffic.ts'
 import { pareto, runGrid, recommend, explain, explainPoint, diagnose } from './optimize.ts'
 import { containerPricePerSec, GPU_PRICE_PER_SEC } from './pricing.ts'
 import { encodeState, decodeState } from './share.ts'
@@ -194,4 +194,66 @@ test('plain-English verdicts cover the p99 blind spot and SLO outcome', () => {
   assert.match(diagnose(base), /p99 hides it/)
   const line = explainPoint(base, { knobs: { minContainers: 1, bufferContainers: 0, scaledownWindow: 60, targetInputs: 0 }, cost: 1, costPerDay: base.costPerDay + 5, p99: 1, p95: 1, coldPct: 0, pareto: true }, 2)
   assert.match(line, /min_containers=1.*meets your 2\.00 s p99 target.*removes 100% of cold starts for \+\$5/)
+})
+
+const near = (a: number, b: number, tol: number, msg = '') => assert.ok(Math.abs(a - b) <= tol, `${a} vs ${b} ${msg}`)
+
+test('prices reproduce the worked examples on modal.com/pricing', () => {
+  // Image job: 1.5 s on an A10G with 1 CPU core and 4 GiB -> $0.000458 GPU, $0.000020 CPU, $0.000013 memory, $0.000491 total.
+  near(GPU_PRICE_PER_SEC.A10G * 1.5, 0.000458, 1.5e-6, 'gpu')
+  near(containerPricePerSec('A10G', 1, 1, 4) * 1.5, 0.000491, 1.5e-6, 'total')
+  // CPU job: 0.5 core and 256 MiB for one hour a day -> $0.02365 CPU and $0.00200 memory per day.
+  near(containerPricePerSec("T4", 0, 0.5, 0) * 3600, 0.02365, 1e-4, "cpu: the page rounds the per-core rate to 0.0000131")
+  near(containerPricePerSec('T4', 0, 0.125, 0.25) * 3600 - containerPricePerSec('T4', 0, 0.125, 0) * 3600, 0.002, 1e-5, 'memory')
+})
+
+test('a lone cold request is billed for boot, work and the full scaledown_window', () => {
+  const c = cfg({ cpuCores: 2, memoryGiB: 8 })
+  const r = simulate(tr([0], 1000), c)
+  const price = containerPricePerSec('T4', 1, 2, 8)
+  near(r.bootCost, 10 * price, 1e-12)
+  near(r.busyCost, 1 * price, 1e-12)
+  near(r.idleCost, 60 * price, 1e-12)
+  near(r.cost, 71 * price, 1e-12)
+  near(r.costPer1k, 71 * price * 1000, 1e-9)
+})
+
+test('reads the real Azure LLM 2023 trace layout (7-digit fractions, token counts)', () => {
+  // First rows of AzureLLMInferenceTrace_conv.csv, Azure Public Dataset, CC BY 4.0.
+  const csv = 'TIMESTAMP,ContextTokens,GeneratedTokens\n2023-11-16 18:15:46.6805900,374,44\n2023-11-16 18:15:50.9951690,396,109\n2023-11-16 18:15:51.2224670,879,62\n'
+  const { trace, notes } = parseTrace(csv)
+  near(trace.t[1], 4.314579, 1e-5)
+  near(trace.t[2], 4.541877, 1e-5)
+  near(trace.d![0], LLM_OVERHEAD_SEC + 374 / PREFILL_TOK_PER_SEC + 44 / DECODE_TOK_PER_SEC, 1e-9)
+  assert.match(notes.join(' '), /estimated from "GeneratedTokens" and "ContextTokens"/)
+})
+
+test('reads the Azure Functions 2021 layout: arrival is end minus duration, busiest function kept', () => {
+  // Excerpt in the published app,func,end_timestamp,duration layout (hashed ids shortened).
+  const csv = 'app,func,end_timestamp,duration\na1,f1,5160.142570018768,0.134\na2,f9,5161.280997037888,0.013\na1,f1,5241.567729949951,42.356\na1,f1,5200.5,0.5\n'
+  const { trace, notes } = parseTrace(csv)
+  assert.equal(trace.t.length, 3)
+  // Arrivals: 5160.0086, 5199.2, 5200.0 -> sorted and rebased.
+  near(trace.t[1], 5199.211729949951 - 5160.008570018768, 1e-9)
+  near(trace.t[2], 5200 - 5160.008570018768, 1e-9)
+  assert.deepEqual(trace.d, [0.134, 42.356, 0.5])
+  assert.match(notes.join(' '), /2 functions.*busiest \(3 of 4/)
+  assert.match(notes.join(' '), /end minus duration/)
+})
+
+test('CSV cells may be quoted with commas and doubled quotes', () => {
+  assert.deepEqual(splitCsvLine('"2025-01-01 00:00:01",200,"/v1/chat?a=1,2","say ""hi"""', ','), ['2025-01-01 00:00:01', '200', '/v1/chat?a=1,2', 'say "hi"'])
+  const { trace } = parseTrace('﻿time,path,latency_ms\n"2025-01-01 00:00:00","/a,b",250\n"2025-01-01 00:00:02","/a,b",750\n')
+  assert.deepEqual(trace.t, [0, 2])
+  assert.deepEqual(trace.d, [0.25, 0.75])
+})
+
+test('timestamps with offsets and UTC suffixes land on the same instant', () => {
+  const { trace } = parseTrace('ts,duration\n2025-03-01T12:00:00Z,1\n2025-03-01 17:30:05+0530,1\n2025-03-01 12:00:10 UTC,1\n2025-03-01T07:00:15-05:00,1\n')
+  assert.deepEqual(trace.t, [0, 5, 10, 15])
+})
+
+test('a 1-hour real-shaped LLM trace keeps sub-millisecond spacing on epoch-scale clocks', () => {
+  const { trace } = parseTrace('ts,duration\n2023-11-16 18:17:03.9799600,1\n2023-11-16 18:17:03.9800100,1\n')
+  near(trace.t[1], 0.00005, 1e-6)
 })

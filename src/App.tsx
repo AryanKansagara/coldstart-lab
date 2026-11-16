@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState, type MouseEvent, type ReactNode } 
 import Landing from './Landing.tsx'
 
 const Tool = lazy(() => import('./Tool.tsx'))
+const Docs = lazy(() => import('./Docs.tsx'))
 
 export function go(href: string) {
   history.pushState({}, '', href)
@@ -60,6 +61,7 @@ function Header({ inApp }: { inApp: boolean }) {
         <nav className="nav-links">
           <a href="/#how">How it works</a>
           <a href="/#knobs">Knobs</a>
+          <Link href="/docs">Docs</Link>
           <a href="https://modal.com/docs/guide/cold-start" target="_blank" rel="noreferrer">
             Modal docs ↗
           </a>
@@ -81,7 +83,7 @@ function Footer() {
   return (
     <footer className="footer">
       <div className="footer-inner">
-        <span>Built by Aryan Kansagara. Independent project, not affiliated with Modal.</span>
+        <span>Built by Aryan Kansagara. Independent project, not affiliated with Modal. <Link href="/docs">Docs</Link></span>
         <span className="mono dim">Everything runs in your browser. No traces leave the page.</span>
       </div>
     </footer>
@@ -106,6 +108,10 @@ export default function App() {
         {inApp ? (
           <Suspense fallback={<div className="lab-loading mono">Booting container…</div>}>
             <Tool />
+          </Suspense>
+        ) : path === '/docs' || path === '/docs/' ? (
+          <Suspense fallback={null}>
+            <Docs />
           </Suspense>
         ) : (
           <Landing />

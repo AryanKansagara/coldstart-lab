@@ -300,6 +300,17 @@ export default function Tool() {
     if (f.size > 120_000_000) return setUploadErr('That file is over 120 MB. Trim it to a representative window first.')
     useText(f.name, await f.text())
   }
+  const loadAzure = async () => {
+    try {
+      const res = await fetch('/samples/azure-llm-conv-2023.csv')
+      if (!res.ok) throw new Error(String(res.status))
+      const text = await res.text()
+      setUploadErr(null)
+      setState((st) => ({ ...st, tab: 'upload', upload: { name: 'Azure LLM chat trace, 2023 (1 h, real)', text }, cfg: sanitizeCfg({ ...st.cfg, ...PRESETS.find((p) => p.id === 'llm8b-h100')?.cfg }, st.cfg) }))
+    } catch {
+      setUploadErr('Could not download the Azure trace. Check your connection and try again.')
+    }
+  }
   const onDrop = (e: DragEvent) => {
     e.preventDefault()
     setDragging(false)
@@ -377,9 +388,19 @@ export default function Tool() {
                   Use pasted log
                 </button>
                 <button className="btn btn-ghost btn-xs" onClick={() => useText('example-export.csv', EXAMPLE_LOG())}>
-                  Load an example
+                  Synthetic example
+                </button>
+                <button className="btn btn-ghost btn-xs" onClick={loadAzure}>
+                  Real Azure LLM trace
                 </button>
               </div>
+              <p className="note">
+                The Azure trace is 19,366 real chat requests from one hour of Azure's production LLM service (
+                <a href="https://github.com/Azure/AzurePublicDataset/blob/master/AzureLLMInferenceDataset2023.md" target="_blank" rel="noreferrer">
+                  Azure Public Dataset
+                </a>
+                , CC BY 4.0). It has token counts, not durations, so service time is estimated from them.
+              </p>
               {uploadErr && <p className="note bad" role="alert">{uploadErr}</p>}
               {!upload && <p className="note">Nothing loaded yet: results below still show the generated traffic.</p>}
               {upload && out && (

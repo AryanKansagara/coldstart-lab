@@ -1,5 +1,5 @@
-// Modal public on-demand prices, per second. Source: https://modal.com/pricing
-export const PRICES_AS_OF = '2026-11-03'
+// Modal public on-demand prices, per second. Source: https://modal.com/pricing (re-checked 2026-11-15)
+export const PRICES_AS_OF = '2026-11-15'
 export const PRICES_SOURCE = 'https://modal.com/pricing'
 
 export const GPU_PRICE_PER_SEC = {

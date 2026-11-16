@@ -102,7 +102,16 @@ export function sanitizeSpec(raw: Partial<TrafficSpec> | null | undefined, base:
 // ---------- parsing user logs ----------
 
 const TIME_KEYS = ['timestamp', 'time', 'ts', 'start', 'start_time', 'started_at', 'created_at', 'arrival', 'enqueued_at', 'date']
+const END_KEYS = ['end_timestamp', 'end_time', 'ended_at', 'finished_at', 'completed_at', 'end_ts']
 const DUR_KEYS = ['duration', 'latency', 'execution_time', 'exec_time', 'runtime', 'elapsed', 'duration_ms', 'latency_ms', 'duration_s', 'execution_ms']
+const IN_TOK_KEYS = ['contexttokens', 'prompt_tokens', 'input_tokens', 'context_tokens']
+const OUT_TOK_KEYS = ['generatedtokens', 'completion_tokens', 'output_tokens', 'generated_tokens']
+const FUNC_KEYS = ['func', 'function', 'function_name', 'func_id', 'endpoint']
+
+/** Assumed LLM serving speed when a log has token counts but no durations (one request on a batched 8B-class server). */
+export const PREFILL_TOK_PER_SEC = 10_000
+export const DECODE_TOK_PER_SEC = 60
+export const LLM_OVERHEAD_SEC = 0.05
 
 export interface ParseResult {
   trace: Trace
@@ -110,38 +119,62 @@ export interface ParseResult {
   notes: string[]
 }
 
+// ISO-like date-times, with a space or T and any number of fraction digits (Azure exports use 7).
+const ISO_RE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(?:[.,](\d+))?\s*(Z|[+-]\d{2}:?\d{2}| ?UTC)?$/i
+
 function toSeconds(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   if (typeof v !== 'string') return null
-  const s = v.trim().replace(/^"|"$/g, '')
+  const s = v.trim()
   if (s === '') return null
   if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s)) return Number(s)
+  const m = ISO_RE.exec(s)
+  if (m) {
+    const zone = !m[4] ? '' : /utc/i.test(m[4]) ? 'Z' : m[4].length === 5 ? `${m[4].slice(0, 3)}:${m[4].slice(3)}` : m[4]
+    const base = Date.parse(`${m[1]}T${m[2].length === 5 ? `${m[2]}:00` : m[2]}${zone}`)
+    return Number.isNaN(base) ? null : base / 1000 + (m[3] ? Number(`0.${m[3]}`) : 0)
+  }
   const ms = Date.parse(s)
   return Number.isNaN(ms) ? null : ms / 1000
 }
 
-function pickKey(keys: string[], wanted: string[]) {
+function pickKey(keys: string[], wanted: string[], exclude: string[] = []) {
   const lower = keys.map((k) => k.toLowerCase().trim())
   for (const w of wanted) {
     const i = lower.indexOf(w)
-    if (i >= 0) return keys[i]
+    if (i >= 0 && !exclude.includes(lower[i])) return keys[i]
   }
   for (const w of wanted) {
-    const i = lower.findIndex((k) => k.includes(w))
+    const i = lower.findIndex((k) => k.includes(w) && !exclude.includes(k))
     if (i >= 0) return keys[i]
   }
   return null
 }
 
-function splitCsvLine(line: string, sep: string) {
-  // Handles quoted fields without embedded separators/newlines; enough for log exports.
-  return line.split(sep).map((c) => c.trim().replace(/^"|"$/g, ''))
+/** RFC 4180-style split of one line: quoted fields may hold separators and doubled quotes. */
+export function splitCsvLine(line: string, sep: string) {
+  if (!line.includes('"')) return line.split(sep).map((c) => c.trim())
+  const out: string[] = []
+  let cur = ''
+  let quoted = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') (cur += '"'), i++
+      else if (ch === '"') quoted = false
+      else cur += ch
+    } else if (ch === '"') quoted = true
+    else if (ch === sep) out.push(cur.trim()), (cur = '')
+    else cur += ch
+  }
+  out.push(cur.trim())
+  return out
 }
 
 export function parseTrace(text: string): ParseResult {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '')
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter((l) => l.trim() !== '')
   if (lines.length === 0) throw new Error('The log is empty.')
-  const rows: Record<string, unknown>[] = []
+  let rows: Record<string, unknown>[] = []
   let skipped = 0
   const notes: string[] = []
 
@@ -166,8 +199,36 @@ export function parseTrace(text: string): ParseResult {
   if (rows.length === 0) throw new Error('No parseable rows found.')
 
   const keys = Object.keys(rows[0])
-  const tk = pickKey(keys, TIME_KEYS) ?? keys[0]
+  // Each Modal Function autoscales on its own, so a multi-function log is narrowed to its busiest function.
+  const fk = pickKey(keys, FUNC_KEYS)
+  if (fk) {
+    const appKey = keys.find((k) => k.toLowerCase().trim() === 'app')
+    const id = (r: Record<string, unknown>) => `${appKey ? r[appKey] : ''}/${r[fk]}`
+    const counts = new Map<string, number>()
+    for (const r of rows) counts.set(id(r), (counts.get(id(r)) ?? 0) + 1)
+    if (counts.size > 1) {
+      let best = ''
+      let bestN = -1
+      for (const [k, n] of counts) if (n > bestN) (best = k), (bestN = n)
+      notes.push(`${counts.size} functions in this log: kept the busiest (${bestN.toLocaleString()} of ${rows.length.toLocaleString()} rows), since each function scales on its own.`)
+      rows = rows.filter((r) => id(r) === best)
+    }
+  }
+
+  const ek = pickKey(keys, END_KEYS)
+  const tk = pickKey(keys, TIME_KEYS, ek ? [ek.toLowerCase().trim()] : []) ?? ek ?? keys[0]
+  const fromEnd = tk === ek
   const dk = pickKey(keys, DUR_KEYS)
+  const ik = dk ? null : pickKey(keys, IN_TOK_KEYS)
+  const ok = dk ? null : pickKey(keys, OUT_TOK_KEYS)
+  const rowDur = (row: Record<string, unknown>): number | null => {
+    if (dk) return toSeconds(row[dk])
+    if (!ok) return null
+    const out = toSeconds(row[ok])
+    if (out === null) return null
+    const inp = ik ? (toSeconds(row[ik]) ?? 0) : 0
+    return LLM_OVERHEAD_SEC + inp / PREFILL_TOK_PER_SEC + out / DECODE_TOK_PER_SEC
+  }
   const pairs: [number, number | null][] = []
   for (const row of rows) {
     const ts = toSeconds(row[tk])
@@ -175,7 +236,7 @@ export function parseTrace(text: string): ParseResult {
       skipped++
       continue
     }
-    const dv = dk ? toSeconds(row[dk]) : null
+    const dv = rowDur(row)
     pairs.push([ts, dv !== null && dv >= 0 ? dv : null])
   }
   if (pairs.length === 0) throw new Error(`Could not read any timestamps from column "${tk}".`)
@@ -194,16 +255,24 @@ export function parseTrace(text: string): ParseResult {
       dScale = 1e-3
       notes.push(`Durations in "${dk}" read as milliseconds.`)
     } else notes.push(`Durations in "${dk}" read as seconds.`)
+  } else if (ok) {
+    notes.push(`No duration column: service time estimated from "${ok}"${ik ? ` and "${ik}"` : ''} at ${DECODE_TOK_PER_SEC} output tok/s and ${PREFILL_TOK_PER_SEC.toLocaleString()} prompt tok/s.`)
   } else notes.push('No duration column: using the configured service time.')
+  if (fromEnd) notes.push(`"${tk}" marks when requests finished: arrivals are end minus duration.`)
 
-  pairs.sort((a, b) => a[0] - b[0])
-  const t0 = pairs[0][0] * tsScale
-  const capped = pairs.slice(0, MAX_REQUESTS)
-  if (capped.length < pairs.length) notes.push(`Trimmed to the first ${MAX_REQUESTS.toLocaleString()} requests.`)
-  const t = capped.map((p) => p[0] * tsScale - t0)
+  // Arrival in seconds; logs that only record completion are shifted back by the request's duration.
+  const arrivals: [number, number | null][] = pairs.map(([ts, d]) => {
+    const dur = d === null ? null : d * dScale
+    return [ts * tsScale - (fromEnd && dur !== null ? dur : 0), dur]
+  })
+  arrivals.sort((a, b) => a[0] - b[0])
+  const t0 = arrivals[0][0]
+  const capped = arrivals.slice(0, MAX_REQUESTS)
+  if (capped.length < arrivals.length) notes.push(`Trimmed to the first ${MAX_REQUESTS.toLocaleString()} requests.`)
+  const t = capped.map((p) => p[0] - t0)
   const haveD = ds.length > capped.length * 0.5
-  const fallback = ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : 1
-  const d = haveD ? capped.map((p) => (p[1] ?? fallback) * dScale) : null
+  const fallback = ds.length ? (ds.reduce((a, b) => a + b, 0) / ds.length) * dScale : 1
+  const d = haveD ? capped.map((p) => p[1] ?? fallback) : null
   const horizon = Math.max(60, t[t.length - 1] + 1)
   return { trace: { t, d, horizon }, skipped, notes }
 }
