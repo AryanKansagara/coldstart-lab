@@ -83,7 +83,7 @@ function Footer() {
   return (
     <footer className="footer">
       <div className="footer-inner">
-        <span>Built by Aryan Kansagara. Independent project, not affiliated with Modal. <Link href="/docs">Docs</Link></span>
+        <span>Built by Aryan Kansagara. <Link href="/docs">Docs</Link></span>
         <span className="mono dim">Everything runs in your browser. No traces leave the page.</span>
       </div>
     </footer>
