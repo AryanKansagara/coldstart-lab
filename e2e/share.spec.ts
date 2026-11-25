@@ -1,4 +1,4 @@
-import { test, expect, openLogs, pasteLog, uploadLog, settled, kpis, copied, decodeLink, HAND_CFG } from './fixtures.ts'
+import { test, expect, openLogs, pasteLog, uploadLog, settled, kpis, alert, copied, decodeLink, HAND_CFG } from './fixtures.ts'
 
 const LOG = 'timestamp,duration_s\n0,2\n11,4\n100,3\n120,1\n'
 
@@ -81,8 +81,46 @@ test.fail('#10: a refused clipboard is not reported as copied', async ({ page })
   expect(await page.locator('.lab-top .micro').textContent()).not.toContain('Link copied')
 })
 
-test.fail('#11: a damaged link says it could not be opened', async ({ page }) => {
+test('#11: a damaged link says it could not be opened', async ({ page }) => {
   await page.goto('/app#s=AAAA-cut-off')
   await expect(page.locator('.kpis')).toBeVisible()
   await expect(page.getByText(/link .*(damaged|could not be (read|opened))/i)).toBeVisible({ timeout: 3000 })
+})
+
+/** A link payload around any text, the way the page writes its own. */
+const payload = (page: import('@playwright/test').Page, text: string) =>
+  page.evaluate(async (t) => {
+    const z = new Uint8Array(await new Response(new Blob([t]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer())
+    return btoa(String.fromCharCode(...z)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  }, text)
+
+const DAMAGED = 'This share link is damaged or cut off'
+
+test('#11: every link that holds no scenario is reported and the visitor keeps their own settings', async ({ page }) => {
+  await openLogs(page, HAND_CFG)
+  await page.waitForTimeout(800)
+  const whole = page.url().split('#s=')[1]
+  const bad = [whole.slice(0, -10), whole.slice(0, whole.length / 2), '', '%%%']
+  for (const t of ['not json', '5', '"text"', 'null', '[]', '{}', '{"a":1}', '{"cfg":"x"}', '{"cfg":[]}', '{"cfg":{},"scenarios":[{"name":{"toString":1}}]}']) bad.push(await payload(page, t))
+  for (const hash of bad) {
+    await page.goto('/docs')
+    await page.goto(`/app#s=${hash}`)
+    await expect(alert(page), hash).toContainText(DAMAGED)
+    await expect(page.locator('.kpis')).toBeVisible()
+    await expect(page.getByLabel('max_containers')).toHaveValue('1')
+  }
+})
+
+test('#11: the damaged link stays in the address and is never copied, until a change replaces it', async ({ page }) => {
+  await page.goto('/app#s=AAAA-cut-off')
+  await settled(page)
+  await page.waitForTimeout(800)
+  expect(page.url()).toContain('#s=AAAA-cut-off')
+  await page.getByRole('button', { name: 'Copy share link' }).click()
+  await page.waitForTimeout(300)
+  expect(await copied(page)).not.toContain('AAAA-cut-off')
+  await page.getByLabel('boot').fill('4')
+  await expect(page.getByText(DAMAGED)).toHaveCount(0)
+  await expect.poll(() => page.url()).not.toContain('AAAA-cut-off')
+  expect((await decodeLink(page, page.url())).cfg.bootSec).toBe(4)
 })

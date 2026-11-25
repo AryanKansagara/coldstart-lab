@@ -55,6 +55,13 @@ function initial(): Saved {
   }
 }
 
+/** The scenario a link carries. Every link has settings, so anything without them is not one. */
+function readShared(d: unknown): Partial<Saved> {
+  const cfg = d && typeof d === 'object' ? (d as Partial<Saved>).cfg : null
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('not a scenario')
+  return d as Partial<Saved>
+}
+
 let nextId = 1
 function call<T>(worker: Worker, msg: object, onProgress?: (done: number, total: number) => void): Promise<T> {
   const id = nextId++
@@ -150,14 +157,15 @@ export default function Tool() {
   const set = (p: Partial<SimConfig>) => setState((s) => ({ ...s, cfg: sanitizeCfg({ ...s.cfg, ...p }, s.cfg) }))
   const setSpec = (p: Partial<TrafficSpec>) => setState((s) => ({ ...s, spec: sanitizeSpec({ ...s.spec, ...p }, s.spec) }))
 
-  // Shared links beat local state.
+  // Shared links beat local state. A damaged one is reported, and stays in the address bar until something changes.
+  const [damaged, setDamaged] = useState<Saved | null>(null)
   const [hydrated, setHydrated] = useState(!location.hash.startsWith('#s='))
   useEffect(() => {
     if (hydrated) return
-    decodeState<Partial<Saved>>(location.hash).then((d) => {
-      if (d) setState(clean({ ...d, ...keptLog() }))
-      setHydrated(true)
-    })
+    decodeState(location.hash)
+      .then((d) => setState(clean({ ...readShared(d), ...keptLog() })))
+      .catch(() => setDamaged(state))
+      .finally(() => setHydrated(true))
     // eslint-disable-next-line
   }, [])
 
@@ -217,7 +225,8 @@ export default function Tool() {
   // Persist + keep the URL shareable.
   const [shareNote, setShareNote] = useState<string | null>(null)
   useEffect(() => {
-    if (!hydrated) return
+    if (!hydrated || damaged === state) return
+    if (damaged) setDamaged(null)
     let live = true
     const h = setTimeout(async () => {
       const storable = !!state.upload && state.upload.text.length <= MAX_STORED_TRACE
@@ -241,9 +250,10 @@ export default function Tool() {
       live = false
       clearTimeout(h)
     }
-  }, [state, hydrated])
+  }, [state, hydrated, damaged])
 
   const share = async () => {
+    if (damaged) return setShareNote('Nothing copied: the address holds a damaged link. Change a setting first.')
     await navigator.clipboard?.writeText(location.href).catch(() => {})
     const dropped = tab === 'upload' && upload && upload.text.length > MAX_SHARED_TRACE
     setShareNote(dropped ? 'Link copied. Your log is too big for a URL, so it carries the settings only.' : 'Link copied.')
@@ -544,6 +554,12 @@ export default function Tool() {
             </button>
           </div>
         </div>
+
+        {damaged && (
+          <div className="alert" role="alert">
+            <b>This share link is damaged or cut off, so it could not be opened.</b> What you see is your own saved state or the defaults, not the shared scenario. Ask for the link again.
+          </div>
+        )}
 
         {error && (
           <div className="alert" role="alert">
