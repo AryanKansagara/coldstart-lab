@@ -96,8 +96,9 @@ test('a failed Azure download says so', async ({ page }) => {
   await expect(alert(page)).toContainText('Could not download the Azure trace')
 })
 
-test.fail('#12: a last row cut off inside its timestamp does not stretch the window', async ({ page }) => {
+test('#12: a last row cut off inside its timestamp does not stretch the window', async ({ page }) => {
   await openLogs(page, HAND_CFG)
   await pasteLog(page, 'timestamp,duration_s\n2026-10-12T14:00:00Z,2\n2026-10-12T14:00:05Z,2\n2026-10-12')
   await expect(note(page)).toContainText('2 requests over 1:00')
+  await expect(note(page)).toContainText('1 rows skipped')
 })
