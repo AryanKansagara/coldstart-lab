@@ -101,7 +101,10 @@ export function sanitizeSpec(raw: Partial<TrafficSpec> | null | undefined, base:
 
 // ---------- parsing user logs ----------
 
-const TIME_KEYS = ['timestamp', 'time', 'ts', 'start', 'start_time', 'started_at', 'created_at', 'arrival', 'enqueued_at', 'date']
+const TIME_KEYS = ['timestamp', 'time', 'ts', 'start', 'start_time', 'started_at', 'created_at', 'arrival', 'enqueued_at', 'date', 'epoch', 'offset', 't', 'tsms', 'when', 'unix', 'received_at', 'logged_at', 'updated_at', 'started', 'created', 'arrived', 'requested_at', 'submitted_at', 'invoked_at']
+// Names that contain a time word but hold a duration or something else.
+const NOT_TIME_RE =
+  /(^|_)((execution|exec|response|processing|service|wait|queue|inference|total|cold|warm|up|down|life|handling|compute|cpu|gpu)_?time|(cold|warm)_?start|run_?time|time_?(taken|out|zone|spent))|sentiment/
 const END_KEYS = ['end_timestamp', 'end_time', 'ended_at', 'finished_at', 'completed_at', 'end_ts']
 const DUR_KEYS = ['duration', 'latency', 'execution_time', 'exec_time', 'runtime', 'elapsed', 'duration_ms', 'latency_ms', 'duration_s', 'execution_ms']
 const IN_TOK_KEYS = ['contexttokens', 'prompt_tokens', 'input_tokens', 'context_tokens']
@@ -122,18 +125,23 @@ export interface ParseResult {
 // ISO-like date-times, with a space or T and any number of fraction digits (Azure exports use 7).
 const ISO_RE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(?:[.,](\d+))?\s*(Z|[+-]\d{2}:?\d{2}| ?UTC)?$/i
 
+const MONTHS = 'jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?'
+// What Date.parse may be trusted with: it also turns "Product 1" and "A-1" into dates.
+const DATE_RE = new RegExp(`^(\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}|\\d{1,2}/\\d{1,2}/\\d{2,4}|\\d{1,2}[-.]\\d{1,2}[-.]\\d{4})(?![\\d./-])|\\b(${MONTHS})\\b.*\\d{4}|\\d{4}.*\\b(${MONTHS})\\b|\\d[ -](${MONTHS})[ -]\\d{2}`, 'i')
+
 function toSeconds(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   if (typeof v !== 'string') return null
   const s = v.trim()
   if (s === '') return null
-  if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s)) return Number(s)
+  if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s)) return Number.isFinite(Number(s)) ? Number(s) : null
   const m = ISO_RE.exec(s)
   if (m) {
     const zone = !m[4] ? '' : /utc/i.test(m[4]) ? 'Z' : m[4].length === 5 ? `${m[4].slice(0, 3)}:${m[4].slice(3)}` : m[4]
     const base = Date.parse(`${m[1]}T${m[2].length === 5 ? `${m[2]}:00` : m[2]}${zone}`)
     return Number.isNaN(base) ? null : base / 1000 + (m[3] ? Number(`0.${m[3]}`) : 0)
   }
+  if (!DATE_RE.test(s)) return null
   const ms = Date.parse(s)
   return Number.isNaN(ms) ? null : ms / 1000
 }
@@ -149,6 +157,56 @@ function pickKey(keys: string[], wanted: string[], exclude: string[] = []) {
     if (i >= 0) return keys[i]
   }
   return null
+}
+
+const isBlank = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && /^(|-+|n\/?a|null|none|nan)$/i.test(v.trim()))
+
+/** A plain, non-negative number, or null. Durations and token counts must not go through the date parser. */
+function toAmount(v: unknown): number | null {
+  if (isBlank(v)) return null
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^[+]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(v.trim()) ? Number(v) : Number.NaN
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
+
+/** Unit named by a duration column, as a factor to seconds, or null when the name says nothing. */
+function unitOf(key: string): [number, string] | null {
+  const n = `_${snake(key).replace(/[^a-z0-9µμ]+/g, '_')}_`
+  if (/_(ns|nsecs?|nanos)_|nanosec|(duration|latency|time|elapsed)_?(ns|nano)/.test(n)) return [1e-9, 'nanoseconds']
+  if (/_(us|usecs?|µs|μs|micros)_|microsec|(duration|latency|time|elapsed)_?(us_|µs|μs|micro)/.test(n)) return [1e-6, 'microseconds']
+  if (/ms|millis/.test(n)) return [1e-3, 'milliseconds']
+  if (/_s|sec/.test(key.toLowerCase())) return [1, 'seconds']
+  return null
+}
+
+const snake = (k: string) => k.trim().replace(/([a-z])([A-Z])/g, '$1_$2').replace(/[\s.-]+/g, '_').toLowerCase()
+
+/** The arrival (or completion) column, or null when nothing in the file says when requests happened. */
+function pickTime(keys: string[], rows: Record<string, unknown>[], durationKey: string | null): { key: string; isEnd: boolean } | null {
+  const names = keys.map(snake)
+  const at = (test: (n: string) => boolean) => names.findIndex((n, i) => keys[i] !== durationKey && !NOT_TIME_RE.test(n) && test(n))
+  // "send_time" and "backend_timestamp" are not end times.
+  const isEndName = (n: string) => END_KEYS.some((w) => n === w || `_${n}`.includes(`_${w}`))
+  const end = [...END_KEYS.map((w) => at((n) => n === w)), at(isEndName)].find((i) => i >= 0) ?? -1
+  const tries = [
+    ...TIME_KEYS.map((w) => (n: string) => n === w),
+    // Short words hide inside others ("attempts", "restarts", "update_count"), so they must stand alone.
+    ...TIME_KEYS.map((w) => (n: string) => (w === 'time' || w === 'timestamp' ? n.includes(w) : w !== 't' && `_${n}_`.includes(`_${w}_`))),
+  ]
+  for (const test of tries) {
+    const i = at((n) => !isEndName(n) && test(n))
+    if (i >= 0) return { key: keys[i], isEnd: false }
+  }
+  if (end >= 0) return { key: keys[end], isEnd: true }
+  // Unknown names: take the first column that can only be a time (a date, or a clock-sized number that is not an id).
+  const sample = rows.slice(0, 50)
+  const isClock = (v: unknown) => {
+    const s = toSeconds(v)
+    if (s === null) return false
+    if (typeof v === 'string' && !/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(v.trim())) return true
+    return [1, 1e3, 1e6, 1e9].some((k) => s >= 1.2e9 * k && s < 2.2e9 * k)
+  }
+  const i = keys.findIndex((k, j) => k !== durationKey && !/(^|_)id$/.test(names[j]) && sample.filter((r) => isClock(r[k])).length * 2 > sample.length)
+  return i >= 0 ? { key: keys[i], isEnd: false } : null
 }
 
 /** RFC 4180-style split of one line: quoted fields may hold separators and doubled quotes. */
@@ -181,7 +239,9 @@ export function parseTrace(text: string): ParseResult {
   if (lines[0].trim().startsWith('{')) {
     for (const l of lines) {
       try {
-        rows.push(JSON.parse(l))
+        const row: unknown = JSON.parse(l)
+        if (row && typeof row === 'object' && !Array.isArray(row)) rows.push(row as Record<string, unknown>)
+        else skipped++
       } catch {
         skipped++
       }
@@ -215,20 +275,26 @@ export function parseTrace(text: string): ParseResult {
     }
   }
 
-  const ek = pickKey(keys, END_KEYS)
-  const tk = pickKey(keys, TIME_KEYS, ek ? [ek.toLowerCase().trim()] : []) ?? ek ?? keys[0]
-  const fromEnd = tk === ek
-  const dk = pickKey(keys, DUR_KEYS)
-  const ik = dk ? null : pickKey(keys, IN_TOK_KEYS)
-  const ok = dk ? null : pickKey(keys, OUT_TOK_KEYS)
+  // JSON lines may add fields later on; those are only consulted when the first line names no duration or token count.
+  const allKeys = () => [...new Set(rows.flatMap((r) => Object.keys(r)))]
+  const findKeys = (ks: string[]) => {
+    const d = pickKey(ks, DUR_KEYS)
+    return { dk: d, ik: d ? null : pickKey(ks, IN_TOK_KEYS), ok: d ? null : pickKey(ks, OUT_TOK_KEYS) }
+  }
+  const first = findKeys(keys)
+  const { dk, ik, ok } = first.dk || first.ok ? first : findKeys(allKeys())
+  const time = pickTime(keys, rows, dk)
+  if (!time) throw new Error(`No time column found (columns: ${keys.slice(0, 8).join(', ').slice(0, 200)}). Name the column that says when each request arrived "timestamp".`)
+  const { key: tk, isEnd: fromEnd } = time
   const rowDur = (row: Record<string, unknown>): number | null => {
-    if (dk) return toSeconds(row[dk])
+    if (dk) return toAmount(row[dk])
     if (!ok) return null
-    const out = toSeconds(row[ok])
-    if (out === null) return null
-    const inp = ik ? (toSeconds(row[ik]) ?? 0) : 0
+    const out = toAmount(row[ok])
+    const inp = !ik || isBlank(row[ik]) ? 0 : toAmount(row[ik])
+    if (out === null || inp === null) return null
     return LLM_OVERHEAD_SEC + inp / PREFILL_TOK_PER_SEC + out / DECODE_TOK_PER_SEC
   }
+  let garbled = 0
   const pairs: [number, number | null][] = []
   for (const row of rows) {
     const ts = toSeconds(row[tk])
@@ -237,27 +303,31 @@ export function parseTrace(text: string): ParseResult {
       continue
     }
     const dv = rowDur(row)
-    pairs.push([ts, dv !== null && dv >= 0 ? dv : null])
+    if (dv === null && ((dk && !isBlank(row[dk])) || (ok && (!isBlank(row[ok]) || (ik && !isBlank(row[ik])))))) garbled++
+    pairs.push([ts, dv])
   }
   if (pairs.length === 0) throw new Error(`Could not read any timestamps from column "${tk}".`)
 
   // Epoch milliseconds / microseconds -> seconds.
   const maxTs = pairs.reduce((m, p) => Math.max(m, p[0]), -Infinity)
-  const tsScale = maxTs > 1e14 ? 1e-6 : maxTs > 1e11 ? 1e-3 : 1
-  if (tsScale !== 1) notes.push(`Timestamps look like epoch ${tsScale === 1e-3 ? 'milliseconds' : 'microseconds'}.`)
+  const tsScale = maxTs > 1e17 ? 1e-9 : maxTs > 1e14 ? 1e-6 : maxTs > 1e11 ? 1e-3 : 1
+  if (tsScale !== 1) notes.push(`Timestamps look like epoch ${tsScale === 1e-3 ? 'milliseconds' : tsScale === 1e-6 ? 'microseconds' : 'nanoseconds'}.`)
 
   let dScale = 1
   const ds = pairs.map((p) => p[1]).filter((x): x is number => x !== null)
-  if (dk) {
-    const name = dk.toLowerCase()
+  const missing = pairs.length - ds.length
+  if (garbled > 0 && garbled >= ds.length) throw new Error(`Could not read ${ds.length ? 'most' : 'any'} durations from column "${dk ?? ok}". Use plain numbers such as 1.5, without units or a decimal comma.`)
+  if (dk && ds.length === 0) notes.push(`"${dk}" is empty: using the configured service time.`)
+  else if (dk) {
     const med = ds.slice().sort((a, b) => a - b)[ds.length >> 1] ?? 0
-    if (/ms|millis/.test(name) || (!/(_s|sec)/.test(name) && med > 100)) {
-      dScale = 1e-3
-      notes.push(`Durations in "${dk}" read as milliseconds.`)
-    } else notes.push(`Durations in "${dk}" read as seconds.`)
+    const [scale, unit] = unitOf(dk) ?? (med > 100 ? [1e-3, 'milliseconds'] : [1, 'seconds'])
+    dScale = scale
+    notes.push(`Durations in "${dk}" read as ${unit}.`)
   } else if (ok) {
     notes.push(`No duration column: service time estimated from "${ok}"${ik ? ` and "${ik}"` : ''} at ${DECODE_TOK_PER_SEC} output tok/s and ${PREFILL_TOK_PER_SEC.toLocaleString()} prompt tok/s.`)
   } else notes.push('No duration column: using the configured service time.')
+  if (missing > 0 && ds.length > 0)
+    notes.push(`${missing.toLocaleString()} of ${pairs.length.toLocaleString()} rows have no readable duration: ${ds.length > pairs.length * 0.5 ? 'they use the mean of the others' : 'using the configured service time for every row'}.`)
   if (fromEnd) notes.push(`"${tk}" marks when requests finished: arrivals are end minus duration.`)
 
   // Arrival in seconds; logs that only record completion are shifted back by the request's duration.
@@ -270,7 +340,7 @@ export function parseTrace(text: string): ParseResult {
   const capped = arrivals.slice(0, MAX_REQUESTS)
   if (capped.length < arrivals.length) notes.push(`Trimmed to the first ${MAX_REQUESTS.toLocaleString()} requests.`)
   const t = capped.map((p) => p[0] - t0)
-  const haveD = ds.length > capped.length * 0.5
+  const haveD = ds.length > pairs.length * 0.5
   const fallback = ds.length ? (ds.reduce((a, b) => a + b, 0) / ds.length) * dScale : 1
   const d = haveD ? capped.map((p) => p[1] ?? fallback) : null
   const horizon = Math.max(60, t[t.length - 1] + 1)

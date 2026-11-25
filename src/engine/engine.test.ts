@@ -182,6 +182,59 @@ test('needed containers track demand and stay below alive in steady state', () =
   assert.ok(Math.abs(mean - 0.4) < 0.1, `utilisation ${mean}`)
 })
 
+test('files without a time column are refused instead of reading the first column as seconds', () => {
+  for (const text of ['status,latency\n200,100\n500,200\n', 'name,price\nProduct 1,3\nProduct 2,4\n', 'id,duration\n1001,2\n1002,3\n', 'restarts,attempts,duration\n1,2,3\n', 'Section 1\nSection 2\n', 'order_id,duration\n1760277603,2\n', 'ip,duration\n192.168.1.1,2\n', 'version,duration\n1.2.3,2\n'])
+    assert.throws(() => parseTrace(text), /No time column found/, text)
+})
+
+test('the arrival column is not a duration, and an unknown name is found by its dates', () => {
+  const t = (text: string) => parseTrace(text).trace.t
+  assert.deepEqual(t('execution_time,event_time\n2,0\n4,11\n'), [0, 11])
+  assert.deepEqual(t('runtime,started_at\n2,5\n3,7\n'), [0, 2])
+  assert.deepEqual(t('response_time_ms,request_started_at\n200,2026-01-01T00:00:00Z\n300,2026-01-01T00:01:00Z\n'), [0, 60])
+  assert.deepEqual(t('status,Zeitpunkt,latency_ms\n200,2026-01-01T00:00:00Z,5\n500,2026-01-01T00:01:00Z,5\n'), [0, 60])
+  assert.deepEqual(t('send_time,duration\n100,5\n200,50\n'), [0, 100])
+  // Dates Date.parse understands still count as dates.
+  for (const [a, b] of [['10/12/2026 14:00:00', '10/12/2026 14:00:09'], ['Oct 12, 2026 2:00:00 PM', 'Oct 12, 2026 2:00:09 PM'], ['Mon, 12 Oct 2026 14:00:00 GMT', 'Mon, 12 Oct 2026 14:00:09 GMT'], ['2026/10/12 14:00:00', '2026/10/12 14:00:09']])
+    assert.deepEqual(t(`timestamp,duration\n"${a}",1\n"${b}",1\n`), [0, 9])
+  const inf = parseTrace('ts,duration\n0,1\n1e400,1\n')
+  assert.deepEqual([inf.trace.t.length, inf.skipped], [1, 1])
+})
+
+test('duration units follow the column name', () => {
+  const d = (head: string, v: string) => parseTrace(`timestamp,${head}\n0,${v}\n`).trace.d![0]
+  for (const h of ['latency_us', 'duration_micros', 'durationMicros', 'duration_microseconds', 'latencyUs', 'elapsed_usec', 'duration (us)']) near(d(h, '2000000'), 2, 1e-9, h)
+  for (const h of ['duration_ns', 'durationNanos', 'latency_nanoseconds', 'duration_nano']) near(d(h, '2000000000'), 2, 1e-9, h)
+  for (const h of ['latency_ms', 'durationMs', 'duration_milliseconds', 'LATENCYMS', 'elapsed_msec']) near(d(h, '2000'), 2, 1e-9, h)
+  for (const h of ['duration_s', 'latency_seconds', 'duration_sec']) near(d(h, '2000'), 2000, 1e-9, h)
+  near(d('duration', '2'), 2, 1e-9)
+  near(d('duration', '2000'), 2, 1e-9)
+  const ns = parseTrace('ts,duration_ns\n1763000000000000000,2000000000\n1763000120000000000,1000000000\n')
+  near(ns.trace.t[1], 120, 1e-3)
+  assert.deepEqual(ns.trace.d, [2, 1])
+})
+
+test('unreadable durations are refused or reported, never guessed', () => {
+  for (const text of ['ts;duration\n0;0,5\n1;1,5\n2;2,5\n', 'ts,duration\n0,2 s\n1,3s\n', 'ts,duration\n0,00:01:30\n', 'ts,duration_ms\n0,"1,500"\n1,"2,500"\n', 'ts,duration\n0,-1\n1,-2\n', 'ts,completion_tokens\n0,abc\n']) assert.throws(() => parseTrace(text), /Could not read any durations/, text)
+  assert.throws(() => parseTrace('ts,duration\n0,2\n1,3s\n2,4s\n'), /Could not read most durations/)
+  const some = parseTrace('ts,duration\n0,2\n1,\n2,2\n3,abc\n4,2\n')
+  assert.deepEqual(some.trace.d, [2, 2, 2, 2, 2])
+  assert.match(some.notes.join(' '), /2 of 5 rows have no readable duration: they use the mean of the others/)
+  const few = parseTrace('ts,duration\n0,1\n1,\n2,\n3,\n')
+  assert.equal(few.trace.d, null)
+  assert.match(few.notes.join(' '), /3 of 4 rows.*configured service time/)
+  assert.equal(parseTrace('ts,duration\n0,1\n1,-\n2,N/A\n').trace.d, null)
+  const none = parseTrace('ts,duration\n0,\n1,\n')
+  assert.equal(none.trace.d, null)
+  assert.match(none.notes.join(' '), /"duration" is empty: using the configured service time/)
+})
+
+test('JSON lines: later fields are found and non-object lines are skipped', () => {
+  const r = parseTrace('{"ts":0}\n{"ts":1,"duration":5}\nnull\n[1]\n{"ts":2,"duration":7}\n')
+  assert.deepEqual(r.trace.d, [6, 5, 7])
+  assert.equal(r.skipped, 2)
+})
+
 test('huge logs parse without blowing the call stack', () => {
   const big = Array.from({ length: 200_000 }, (_, i) => String(i)).join('\n')
   assert.equal(parseTrace(big).trace.t.length, 200_000)
@@ -189,8 +242,9 @@ test('huge logs parse without blowing the call stack', () => {
 })
 
 test('plain-English verdicts cover the p99 blind spot and SLO outcome', () => {
-  const t = Array.from({ length: 500 }, (_, i) => i * 2)
-  const base = simulate(tr(t, 1000), cfg({ scaledownWindow: 1200 }))
+  // 6 requests wait on the first boots (0-10 s): under 1% of 1000.
+  const t = Array.from({ length: 1000 }, (_, i) => i * 2)
+  const base = simulate(tr(t, 2000), cfg({ scaledownWindow: 1200 }))
   assert.match(diagnose(base), /p99 hides it/)
   const line = explainPoint(base, { knobs: { minContainers: 1, bufferContainers: 0, scaledownWindow: 60, targetInputs: 0 }, cost: 1, costPerDay: base.costPerDay + 5, p99: 1, p95: 1, coldPct: 0, pareto: true }, 2)
   assert.match(line, /min_containers=1.*meets your 2\.00 s p99 target.*removes 100% of cold starts for \+\$5/)
@@ -256,4 +310,26 @@ test('timestamps with offsets and UTC suffixes land on the same instant', () => 
 test('a 1-hour real-shaped LLM trace keeps sub-millisecond spacing on epoch-scale clocks', () => {
   const { trace } = parseTrace('ts,duration\n2023-11-16 18:17:03.9799600,1\n2023-11-16 18:17:03.9800100,1\n')
   near(trace.t[1], 0.00005, 1e-6)
+})
+
+test('work taken straight from the queue is billed as busy, not idle', () => {
+  // Warm container, 5 requests at once, 2 s each: busy 0-10 of a 10 s window, so nothing is idle until the queue drains.
+  const r = simulate(tr([0, 0, 0, 0, 0], 10), cfg({ minContainers: 1, maxContainers: 1, serviceMean: 2 }))
+  assert.equal(r.idleCost, 0)
+  near(r.busyCost, r.cost, 1e-12)
+  // Same on a container with two slots: 0-2, 2-4, 4-6 busy, then 4 s idle.
+  const two = simulate(tr([0, 0, 0, 0, 0], 10), cfg({ minContainers: 1, maxContainers: 1, maxInputs: 2, serviceMean: 2 }))
+  const price = containerPricePerSec('T4', 1, 0, 0)
+  near(two.busyCost, 6 * price, 1e-12)
+  near(two.idleCost, 4 * price, 1e-12)
+})
+
+test('every request that arrived before its container was ready is a cold hit', () => {
+  // Boot 0-10, then one at a time: requests at 0, 1 and 9 arrived before 10; the one at 10.5 queued but arrived after.
+  const r = simulate(tr([0, 1, 9, 10.5]), cfg({ maxContainers: 1 }), { detail: true })
+  assert.deepEqual([...r.detail!.cold], [1, 1, 1, 0])
+  // No boot time, no cold start.
+  assert.equal(simulate(tr([0, 0]), cfg({ maxContainers: 1, bootSec: 0, imageSec: 0, modelSec: 0 })).coldCount, 0)
+  // Queued behind a warm container only: not cold.
+  assert.equal(simulate(tr([0, 0, 0]), cfg({ minContainers: 1, maxContainers: 1 })).coldCount, 0)
 })
