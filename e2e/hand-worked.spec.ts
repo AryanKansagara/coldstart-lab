@@ -112,7 +112,7 @@ test('#3: a request that waits behind a booting container counts as a cold start
   expect((await kpis(page))['cold-start hits']).toBe('100% | 2 requests')
 })
 
-test.fail('#9: the timeline covers a run that outlasts the last arrival', async ({ page }) => {
+test('#9: the timeline covers a run that outlasts the last arrival', async ({ page }) => {
   // One request: boot 0-10, work 10-110. The run is 110 s, all of it with one container alive, and all of it must be drawn.
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await openLogs(page, HAND_CFG)
@@ -121,4 +121,7 @@ test.fail('#9: the timeline covers a run that outlasts the last arrival', async 
   await svg.focus()
   for (let i = 0; i < 130; i++) await svg.press('ArrowRight') // to the last bucket
   await expect(page.locator('.tip b').first()).toHaveText('t = 1:49')
+  // The alive line stays at one container from the first bucket to the last.
+  const d = await svg.locator('path[stroke="var(--viz-alive)"]').getAttribute('d')
+  expect(new Set(d!.slice(1).split('L').map((p) => p.trim().split(/\s+/)[1]))).toEqual(new Set(['8.0']))
 })

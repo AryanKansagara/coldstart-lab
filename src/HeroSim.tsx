@@ -291,7 +291,7 @@ export default function HeroSim() {
         ctx.arc(X(i), cy0 + chartH - 3, 2.5, 0, Math.PI * 2)
         ctx.fill()
       })
-      const ph = 8 + ((W - 16) * s) / H
+      const ph = 8 + ((W - 16) * s) / r.horizon
       ctx.strokeStyle = colors.text
       ctx.globalAlpha = 0.6
       ctx.beginPath()

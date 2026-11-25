@@ -207,10 +207,8 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
   const coldHit = new Uint8Array(n)
   const assigned = new Int32Array(n).fill(-1)
 
-  const B = opts.buckets ?? 240
-  const bucketSec = trace.horizon / B
-  const bucketOf = (t: number) => Math.min(B - 1, Math.max(0, Math.floor(t / bucketSec)))
-  const qPeak = new Array<number>(B).fill(0)
+  /** Queue depth each request found on joining the queue, itself included. */
+  const queueDepth = new Int32Array(n)
 
   const spawn = (now: number, warm: boolean) => {
     const b: Box = { id: boxes.length, start: now, ready: warm ? now : now + cold, end: Infinity, warm, load: 0, idleSince: now, busySince: 0, busy: 0 }
@@ -275,8 +273,7 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
       if (b) assign(i, b, now)
       else {
         queue.push(i)
-        const bi = bucketOf(now)
-        qPeak[bi] = Math.max(qPeak[bi], queue.length - qHead)
+        queueDepth[i] = queue.length - qHead
       }
     } else {
       const [t, kind, cid, x] = heap.pop()
@@ -344,19 +341,24 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
     if (qt[i] > 1e-9) queued++
   }
 
-  // Timeline
+  // Timeline: covers the whole billed run, which outlasts the trace when work is still going at its end.
+  const B = opts.buckets ?? 240
+  const bucketSec = end / B
+  const bucketOf = (t: number) => Math.min(B - 1, Math.max(0, Math.floor(t / bucketSec)))
+  const qPeak = new Array<number>(B).fill(0)
   const load = new Array<number>(B).fill(0)
   const coldB = new Array<number>(B).fill(0)
   for (let i = 0; i < n; i++) {
     const bi = bucketOf(trace.t[i])
     load[bi]++
     if (coldHit[i]) coldB[bi]++
+    qPeak[bi] = Math.max(qPeak[bi], queueDepth[i])
   }
   const aliveB = new Array<number>(B).fill(0)
   const bootB = new Array<number>(B).fill(0)
   const addSpan = (arr: number[], a: number, z: number) => {
     a = Math.max(0, a)
-    z = Math.min(trace.horizon, z)
+    z = Math.min(end, z)
     if (z <= a) return
     const i0 = bucketOf(a)
     const i1 = bucketOf(z - 1e-9)
