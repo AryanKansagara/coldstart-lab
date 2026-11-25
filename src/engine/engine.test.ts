@@ -189,8 +189,9 @@ test('huge logs parse without blowing the call stack', () => {
 })
 
 test('plain-English verdicts cover the p99 blind spot and SLO outcome', () => {
-  const t = Array.from({ length: 500 }, (_, i) => i * 2)
-  const base = simulate(tr(t, 1000), cfg({ scaledownWindow: 1200 }))
+  // 6 requests wait on the first boots (0-10 s): under 1% of 1000.
+  const t = Array.from({ length: 1000 }, (_, i) => i * 2)
+  const base = simulate(tr(t, 2000), cfg({ scaledownWindow: 1200 }))
   assert.match(diagnose(base), /p99 hides it/)
   const line = explainPoint(base, { knobs: { minContainers: 1, bufferContainers: 0, scaledownWindow: 60, targetInputs: 0 }, cost: 1, costPerDay: base.costPerDay + 5, p99: 1, p95: 1, coldPct: 0, pareto: true }, 2)
   assert.match(line, /min_containers=1.*meets your 2\.00 s p99 target.*removes 100% of cold starts for \+\$5/)
@@ -268,4 +269,14 @@ test('work taken straight from the queue is billed as busy, not idle', () => {
   const price = containerPricePerSec('T4', 1, 0, 0)
   near(two.busyCost, 6 * price, 1e-12)
   near(two.idleCost, 4 * price, 1e-12)
+})
+
+test('every request that arrived before its container was ready is a cold hit', () => {
+  // Boot 0-10, then one at a time: requests at 0, 1 and 9 arrived before 10; the one at 10.5 queued but arrived after.
+  const r = simulate(tr([0, 1, 9, 10.5]), cfg({ maxContainers: 1 }), { detail: true })
+  assert.deepEqual([...r.detail!.cold], [1, 1, 1, 0])
+  // No boot time, no cold start.
+  assert.equal(simulate(tr([0, 0]), cfg({ maxContainers: 1, bootSec: 0, imageSec: 0, modelSec: 0 })).coldCount, 0)
+  // Queued behind a warm container only: not cold.
+  assert.equal(simulate(tr([0, 0, 0]), cfg({ minContainers: 1, maxContainers: 1 })).coldCount, 0)
 })

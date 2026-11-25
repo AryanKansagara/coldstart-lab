@@ -105,7 +105,7 @@ test('#2: work done back to back is not counted as idle', async ({ page }) => {
   await expect(page.locator('.diagnosis')).toContainText('90% of spend')
 })
 
-test.fail('#3: a request that waits behind a booting container counts as a cold start', async ({ page }) => {
+test('#3: a request that waits behind a booting container counts as a cold start', async ({ page }) => {
   // Boot 0-10, then 10-12 and 12-14. Both requests arrived (0 and 1 s) before the container that served them was ready.
   await openLogs(page, HAND_CFG)
   await pasteLog(page, 'timestamp,duration_s\n0,2\n1,2\n')
