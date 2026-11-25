@@ -155,7 +155,10 @@ export default function Tool() {
   }, [])
 
   const source: Source = useMemo(() => (tab === 'upload' && upload ? { type: 'upload', ...upload } : { type: 'synthetic', spec }), [tab, upload, spec])
-  const traceKey = source.type === 'synthetic' ? JSON.stringify(spec) : `${source.name}:${source.text.length}`
+  // Numbers each distinct log, so a replacement of the same name and length is still a new trace.
+  const seen = useRef<{ text: string; n: number }>({ text: '', n: 0 })
+  if (source.type === 'upload' && source.text !== seen.current.text) seen.current = { text: source.text, n: seen.current.n + 1 }
+  const traceKey = source.type === 'synthetic' ? JSON.stringify(spec) : `log ${seen.current.n}`
 
   const worker = useRef<Worker | null>(null)
   const [out, setOut] = useState<{ result: SimResult; insights: Insight[]; info: TraceInfo } | null>(null)
