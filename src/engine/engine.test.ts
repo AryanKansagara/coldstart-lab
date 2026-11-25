@@ -182,6 +182,25 @@ test('needed containers track demand and stay below alive in steady state', () =
   assert.ok(Math.abs(mean - 0.4) < 0.1, `utilisation ${mean}`)
 })
 
+test('files without a time column are refused instead of reading the first column as seconds', () => {
+  for (const text of ['status,latency\n200,100\n500,200\n', 'name,price\nProduct 1,3\nProduct 2,4\n', 'id,duration\n1001,2\n1002,3\n', 'restarts,attempts,duration\n1,2,3\n', 'Section 1\nSection 2\n', 'order_id,duration\n1760277603,2\n', 'ip,duration\n192.168.1.1,2\n', 'version,duration\n1.2.3,2\n'])
+    assert.throws(() => parseTrace(text), /No time column found/, text)
+})
+
+test('the arrival column is not a duration, and an unknown name is found by its dates', () => {
+  const t = (text: string) => parseTrace(text).trace.t
+  assert.deepEqual(t('execution_time,event_time\n2,0\n4,11\n'), [0, 11])
+  assert.deepEqual(t('runtime,started_at\n2,5\n3,7\n'), [0, 2])
+  assert.deepEqual(t('response_time_ms,request_started_at\n200,2026-01-01T00:00:00Z\n300,2026-01-01T00:01:00Z\n'), [0, 60])
+  assert.deepEqual(t('status,Zeitpunkt,latency_ms\n200,2026-01-01T00:00:00Z,5\n500,2026-01-01T00:01:00Z,5\n'), [0, 60])
+  assert.deepEqual(t('send_time,duration\n100,5\n200,50\n'), [0, 100])
+  // Dates Date.parse understands still count as dates.
+  for (const [a, b] of [['10/12/2026 14:00:00', '10/12/2026 14:00:09'], ['Oct 12, 2026 2:00:00 PM', 'Oct 12, 2026 2:00:09 PM'], ['Mon, 12 Oct 2026 14:00:00 GMT', 'Mon, 12 Oct 2026 14:00:09 GMT'], ['2026/10/12 14:00:00', '2026/10/12 14:00:09']])
+    assert.deepEqual(t(`timestamp,duration\n"${a}",1\n"${b}",1\n`), [0, 9])
+  const inf = parseTrace('ts,duration\n0,1\n1e400,1\n')
+  assert.deepEqual([inf.trace.t.length, inf.skipped], [1, 1])
+})
+
 test('huge logs parse without blowing the call stack', () => {
   const big = Array.from({ length: 200_000 }, (_, i) => String(i)).join('\n')
   assert.equal(parseTrace(big).trace.t.length, 200_000)
