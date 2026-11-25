@@ -30,6 +30,9 @@ npm install
 npm run dev
 npm test
 npm run build
+npm run test:e2e   # builds, then runs Playwright against `vite preview`
 ```
+
+The end-to-end tests need Chromium once (`npx playwright install chromium`). Set `E2E_PORT` to change the preview port (default 4463).
 
 
