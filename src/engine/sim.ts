@@ -220,13 +220,14 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
     else heap.push(b.ready, READY, b.id, 0)
   }
 
-  const assign = (i: number, b: Box, now: number, isCold: boolean) => {
+  const assign = (i: number, b: Box, now: number) => {
     if (b.load === 0) b.busySince = now
     b.load++
     inflight++
     assigned[i] = b.id
     dispatchT[i] = now
-    coldHit[i] = isCold ? 1 : 0
+    // Cold: the container that serves it had not finished booting when it arrived.
+    coldHit[i] = b.ready > trace.t[i] ? 1 : 0
     doneT[i] = now + dur(i)
     heap.push(doneT[i], DONE, b.id, i)
   }
@@ -271,7 +272,7 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
       const i = next++
       now = trace.t[i]
       const b = pick()
-      if (b) assign(i, b, now, false)
+      if (b) assign(i, b, now)
       else {
         queue.push(i)
         const bi = bucketOf(now)
@@ -286,7 +287,7 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
         inflight--
         // Close the busy span first: a queued input taken over here starts a new one.
         if (b.load === 0) b.busy += now - b.busySince
-        if (qHead < queue.length) assign(queue[qHead++], b, now, false)
+        if (qHead < queue.length) assign(queue[qHead++], b, now)
         else if (b.load === 0) {
           b.idleSince = now
           heap.push(now + window, IDLE, b.id, now)
@@ -294,7 +295,7 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
       } else if (kind === READY) {
         b.warm = true
         b.idleSince = now
-        while (qHead < queue.length && b.load < maxIn) assign(queue[qHead++], b, now, true)
+        while (qHead < queue.length && b.load < maxIn) assign(queue[qHead++], b, now)
         if (b.load === 0) heap.push(now + window, IDLE, b.id, now)
       } else if (kind === IDLE) {
         if (b.end !== Infinity || b.load > 0 || b.idleSince !== x) continue
