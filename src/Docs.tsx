@@ -24,7 +24,7 @@ export default function Docs() {
           <b>JSONL</b>, one object per line.
         </li>
         <li>
-          <b>Arrival time</b> from a column named like <code>timestamp</code>, <code>time</code>, <code>ts</code>, <code>start_time</code>, <code>created_at</code> or <code>date</code>: ISO 8601 (space or T, any number of fraction digits, optional offset), epoch seconds, milliseconds or microseconds, or seconds from the start of the trace.
+          <b>Arrival time</b> from a column named like <code>timestamp</code>, <code>time</code>, <code>ts</code>, <code>start_time</code>, <code>created_at</code> or <code>date</code>: ISO 8601 (space or T, any number of fraction digits, optional offset), epoch seconds, milliseconds, microseconds or nanoseconds, or seconds from the start of the trace. A file with no such column, and no column of dates, is refused.
         </li>
         <li>
           <b>Completion-only logs</b> such as the{' '}
@@ -34,7 +34,7 @@ export default function Docs() {
           (<code>app,func,end_timestamp,duration</code>): arrival is <code>end_timestamp − duration</code>.
         </li>
         <li>
-          <b>Duration</b> from <code>duration</code>, <code>latency</code>, <code>execution_time</code> and similar. Names with <code>ms</code>, or a median above 100, are read as milliseconds.
+          <b>Duration</b> from <code>duration</code>, <code>latency</code>, <code>execution_time</code> and similar. A unit in the name (<code>s</code>, <code>ms</code>, <code>us</code>, <code>ns</code>) is honoured; without one, a median above 100 is read as milliseconds. Values must be plain numbers.
         </li>
         <li>
           <b>LLM token logs</b> such as the{' '}
