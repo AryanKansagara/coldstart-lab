@@ -381,3 +381,26 @@ test('min_containers is suggested only up to max_containers, and every suggestio
   assert.equal(labels({ minContainers: 0, maxContainers: 1 })[1], 'min_containers=1')
   assert.equal(labels({ minContainers: 2, maxContainers: 3 })[1], 'min_containers=3')
 })
+
+test('the timeline covers the whole billed run, also when work outlasts the trace', () => {
+  const price = (c: SimConfig) => containerPricePerSec(c.gpu, c.gpuCount, c.cpuCores, c.memoryGiB)
+  const cases: [Trace, SimConfig][] = [
+    [tr([0], 60, [100]), cfg({ maxContainers: 1 })],
+    [tr([0, 5, 59], 60, [300, 1, 2]), cfg({ minContainers: 1, maxContainers: 2, bufferContainers: 1 })],
+    [tr([0, 11, 100, 120], 121, [2, 4, 3, 1]), cfg({ maxContainers: 1 })],
+    [generate({ kind: 'bursty', rate: 0.5, hours: 1, seed: 7, serviceMean: 20, serviceCv: 1 }), cfg({ maxContainers: 3 })],
+  ]
+  for (const [t, c] of cases) {
+    for (const buckets of [8, 240]) {
+      const r = simulate(t, c, { buckets })
+      const total = (a: number[]) => a.reduce((x, y) => x + y, 0) * r.timeline.bucketSec
+      assert.ok(Math.abs(r.timeline.bucketSec * buckets - r.horizon) < 1e-6)
+      assert.ok(Math.abs(total(r.timeline.alive) * price(c) - r.cost) < 1e-6 * r.cost + 1e-9)
+      assert.ok(Math.abs(total(r.timeline.booting) * price(c) - r.bootCost) < 1e-6 * r.cost + 1e-9)
+      assert.ok(Math.abs(total(r.timeline.load) - r.n) < 1e-6 * r.n)
+      assert.equal(r.timeline.cold.reduce((x, y) => x + y, 0), r.coldCount)
+      // Demand includes the work after the last arrival: time in system, over target_inputs.
+      assert.ok(Math.abs(total(r.timeline.needed) - r.mean * r.n) < 1e-6 * r.mean * r.n)
+    }
+  }
+})
