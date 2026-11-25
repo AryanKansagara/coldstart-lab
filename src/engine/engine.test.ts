@@ -365,3 +365,19 @@ test('logs of plain dates, plain numbers and mixed precision keep every row', ()
     assert.deepEqual([trace.t.length, skipped], [3, 0], log)
   }
 })
+
+test('min_containers is suggested only up to max_containers, and every suggestion fits the valid range', () => {
+  const t = tr([0, 100, 200])
+  const labels = (o: Partial<SimConfig>) => {
+    const c = cfg({ cpuCores: 1, ...o })
+    return explain(t, c, simulate(t, c)).map((i) => {
+      const applied = { ...c, ...i.change }
+      assert.deepEqual(sanitizeCfg(applied, c), applied, i.label)
+      return i.label
+    })
+  }
+  assert.ok(!labels({ minContainers: 1, maxContainers: 1 }).includes('min_containers=2'))
+  assert.ok(!labels({ minContainers: 3, maxContainers: 3 }).includes('min_containers=4'))
+  assert.equal(labels({ minContainers: 0, maxContainers: 1 })[1], 'min_containers=1')
+  assert.equal(labels({ minContainers: 2, maxContainers: 3 })[1], 'min_containers=3')
+})

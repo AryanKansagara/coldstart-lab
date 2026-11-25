@@ -69,11 +69,12 @@ test('scenarios compare, apply and are removed', async ({ page }) => {
   await expect(page.getByText('Save up to four configs')).toBeVisible()
 })
 
-test.fail('#13: no suggestion to go past max_containers', async ({ page }) => {
+test('#13: no suggestion to go past max_containers', async ({ page }) => {
   await page.goto('/app')
   await page.getByLabel('max_containers').fill('1')
   await page.getByLabel('min_containers').fill('1')
   await settled(page)
   await expect(page.locator('.insights')).toBeVisible()
   await expect(page.locator('.insights')).not.toContainText('min_containers=2')
+  await expect(page.locator('.insights')).toContainText('min_containers=0')
 })

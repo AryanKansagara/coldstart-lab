@@ -93,11 +93,12 @@ function describe(label: string, base: SimResult, r: SimResult): string {
 export function explain(trace: Trace, cfg: SimConfig, base: SimResult): Insight[] {
   const tries: [string, Partial<SimConfig>][] = [
     [`buffer_containers=${cfg.bufferContainers + 1}`, { bufferContainers: cfg.bufferContainers + 1 }],
-    [`min_containers=${cfg.minContainers + 1}`, { minContainers: Math.min(cfg.maxContainers, cfg.minContainers + 1) }],
     cfg.scaledownWindow < 600
       ? [`scaledown_window=${Math.min(1200, Math.max(300, cfg.scaledownWindow * 4))}`, { scaledownWindow: Math.min(1200, Math.max(300, cfg.scaledownWindow * 4)) }]
       : [`scaledown_window=60`, { scaledownWindow: 60 }],
   ]
+  // min_containers cannot go past max_containers.
+  if (cfg.minContainers < cfg.maxContainers) tries.splice(1, 0, [`min_containers=${cfg.minContainers + 1}`, { minContainers: cfg.minContainers + 1 }])
   if (!cfg.snapshot) tries.push(['enable_memory_snapshot=True', { snapshot: true }])
   if (cfg.minContainers > 0) tries.push([`min_containers=0`, { minContainers: 0 }])
   if (cfg.bufferContainers > 0) tries.push([`buffer_containers=0`, { bufferContainers: 0 }])
