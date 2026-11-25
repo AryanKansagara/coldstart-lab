@@ -1,6 +1,6 @@
 import { test, expect, openLogs, pasteLog, uploadLog, alert, kpis, HAND_CFG } from './fixtures.ts'
 
-test.fail('#7: no result is shown for a log that could not be read', async ({ page }) => {
+test('#7: no result is shown for a log that could not be read', async ({ page }) => {
   await openLogs(page, HAND_CFG)
   await pasteLog(page, 'timestamp,duration_s\n0,2\n')
   await uploadLog(page, 'bad.csv', 'timestamp,duration_s\nabc,2\n')
