@@ -195,7 +195,10 @@ export default function Tool() {
           setReplayKey((k) => k + 1)
         }
       } catch (e) {
-        if (id === latest.current) setError((e as Error).message)
+        if (id !== latest.current) return
+        // Nothing to show for this input: the previous trace's numbers would look like its result.
+        setOut(null)
+        setError((e as Error).message)
       } finally {
         if (id === latest.current) setBusy(false)
       }
@@ -509,7 +512,7 @@ export default function Tool() {
             <h1>Autoscaler replay</h1>
             <p className="dim mono">
               <span className={`status ${busy ? 'on' : ''}`} aria-hidden />
-              {busy ? 'simulating in worker…' : r ? `${r.n.toLocaleString()} requests · ${fmtClock(r.horizon, r.horizon)} window · ${r.containersStarted} cold boots` : 'waiting for first run'}
+              {busy ? 'simulating in worker…' : r ? `${r.n.toLocaleString()} requests · ${fmtClock(r.horizon, r.horizon)} window · ${r.containersStarted} cold boots` : error ? 'no result' : 'waiting for first run'}
             </p>
           </div>
           <div className="row">
