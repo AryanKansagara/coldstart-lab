@@ -98,7 +98,7 @@ test('the optimizer finds both paper frontier points and applying one changes th
   await expect(page.locator('pre.code')).toContainText('scaledown_window=2,')
 })
 
-test.fail('#2: work done back to back is not counted as idle', async ({ page }) => {
+test('#2: work done back to back is not counted as idle', async ({ page }) => {
   // Paper example: 10 of the 97 billed seconds are work, so 87 / 97 = 89.69% is idle or booting.
   await openLogs(page, HAND_CFG)
   await pasteLog(page, LOG)

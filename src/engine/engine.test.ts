@@ -257,3 +257,15 @@ test('a 1-hour real-shaped LLM trace keeps sub-millisecond spacing on epoch-scal
   const { trace } = parseTrace('ts,duration\n2023-11-16 18:17:03.9799600,1\n2023-11-16 18:17:03.9800100,1\n')
   near(trace.t[1], 0.00005, 1e-6)
 })
+
+test('work taken straight from the queue is billed as busy, not idle', () => {
+  // Warm container, 5 requests at once, 2 s each: busy 0-10 of a 10 s window, so nothing is idle until the queue drains.
+  const r = simulate(tr([0, 0, 0, 0, 0], 10), cfg({ minContainers: 1, maxContainers: 1, serviceMean: 2 }))
+  assert.equal(r.idleCost, 0)
+  near(r.busyCost, r.cost, 1e-12)
+  // Same on a container with two slots: 0-2, 2-4, 4-6 busy, then 4 s idle.
+  const two = simulate(tr([0, 0, 0, 0, 0], 10), cfg({ minContainers: 1, maxContainers: 1, maxInputs: 2, serviceMean: 2 }))
+  const price = containerPricePerSec('T4', 1, 0, 0)
+  near(two.busyCost, 6 * price, 1e-12)
+  near(two.idleCost, 4 * price, 1e-12)
+})

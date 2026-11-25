@@ -284,9 +284,10 @@ export function simulate(trace: Trace, cfg: SimConfig, opts: { buckets?: number;
       if (kind === DONE) {
         b.load--
         inflight--
+        // Close the busy span first: a queued input taken over here starts a new one.
+        if (b.load === 0) b.busy += now - b.busySince
         if (qHead < queue.length) assign(queue[qHead++], b, now, false)
         else if (b.load === 0) {
-          b.busy += now - b.busySince
           b.idleSince = now
           heap.push(now + window, IDLE, b.id, now)
         }
