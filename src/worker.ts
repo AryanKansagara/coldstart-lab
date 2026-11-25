@@ -13,12 +13,14 @@ export interface TraceInfo {
   hasDurations: boolean
 }
 
-let cacheKey = ''
+let cacheKey: Source | null = null
 let cached: { trace: Trace; info: TraceInfo } | null = null
 
+const sameSource = (a: Source, b: Source) =>
+  a.type === 'synthetic' ? b.type === 'synthetic' && JSON.stringify(a.spec) === JSON.stringify(b.spec) : b.type === 'upload' && a.text === b.text
+
 function load(source: Source) {
-  const key = source.type === 'synthetic' ? JSON.stringify(source.spec) : `${source.name}:${source.text.length}:${source.text.slice(0, 200)}`
-  if (key === cacheKey && cached) return cached
+  if (cached && cacheKey && sameSource(cacheKey, source)) return cached
   if (source.type === 'synthetic') {
     const trace = generate(source.spec)
     const notes = trace.t.length >= MAX_REQUESTS ? [`Capped at ${MAX_REQUESTS.toLocaleString()} requests: lower the rate or duration to simulate the full window.`] : []
@@ -27,7 +29,7 @@ function load(source: Source) {
     const { trace, skipped, notes } = parseTrace(source.text)
     cached = { trace, info: { n: trace.t.length, horizon: trace.horizon, notes, skipped, hasDurations: trace.d !== null } }
   }
-  cacheKey = key
+  cacheKey = source
   return cached
 }
 
