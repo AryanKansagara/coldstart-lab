@@ -155,7 +155,10 @@ export default function Tool() {
   }, [])
 
   const source: Source = useMemo(() => (tab === 'upload' && upload ? { type: 'upload', ...upload } : { type: 'synthetic', spec }), [tab, upload, spec])
-  const traceKey = source.type === 'synthetic' ? JSON.stringify(spec) : `${source.name}:${source.text.length}`
+  // Numbers each distinct log, so a replacement of the same name and length is still a new trace.
+  const seen = useRef<{ text: string; n: number }>({ text: '', n: 0 })
+  if (source.type === 'upload' && source.text !== seen.current.text) seen.current = { text: source.text, n: seen.current.n + 1 }
+  const traceKey = source.type === 'synthetic' ? JSON.stringify(spec) : `log ${seen.current.n}`
 
   const worker = useRef<Worker | null>(null)
   const [out, setOut] = useState<{ result: SimResult; insights: Insight[]; info: TraceInfo } | null>(null)
@@ -192,7 +195,10 @@ export default function Tool() {
           setReplayKey((k) => k + 1)
         }
       } catch (e) {
-        if (id === latest.current) setError((e as Error).message)
+        if (id !== latest.current) return
+        // Nothing to show for this input: the previous trace's numbers would look like its result.
+        setOut(null)
+        setError((e as Error).message)
       } finally {
         if (id === latest.current) setBusy(false)
       }
@@ -506,7 +512,7 @@ export default function Tool() {
             <h1>Autoscaler replay</h1>
             <p className="dim mono">
               <span className={`status ${busy ? 'on' : ''}`} aria-hidden />
-              {busy ? 'simulating in worker…' : r ? `${r.n.toLocaleString()} requests · ${fmtClock(r.horizon, r.horizon)} window · ${r.containersStarted} cold boots` : 'waiting for first run'}
+              {busy ? 'simulating in worker…' : r ? `${r.n.toLocaleString()} requests · ${fmtClock(r.horizon, r.horizon)} window · ${r.containersStarted} cold boots` : error ? 'no result' : 'waiting for first run'}
             </p>
           </div>
           <div className="row">
