@@ -98,14 +98,14 @@ test('the optimizer finds both paper frontier points and applying one changes th
   await expect(page.locator('pre.code')).toContainText('scaledown_window=2,')
 })
 
-test.fail('#2: work done back to back is not counted as idle', async ({ page }) => {
+test('#2: work done back to back is not counted as idle', async ({ page }) => {
   // Paper example: 10 of the 97 billed seconds are work, so 87 / 97 = 89.69% is idle or booting.
   await openLogs(page, HAND_CFG)
   await pasteLog(page, LOG)
   await expect(page.locator('.diagnosis')).toContainText('90% of spend')
 })
 
-test.fail('#3: a request that waits behind a booting container counts as a cold start', async ({ page }) => {
+test('#3: a request that waits behind a booting container counts as a cold start', async ({ page }) => {
   // Boot 0-10, then 10-12 and 12-14. Both requests arrived (0 and 1 s) before the container that served them was ready.
   await openLogs(page, HAND_CFG)
   await pasteLog(page, 'timestamp,duration_s\n0,2\n1,2\n')
