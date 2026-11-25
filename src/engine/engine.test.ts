@@ -201,6 +201,40 @@ test('the arrival column is not a duration, and an unknown name is found by its 
   assert.deepEqual([inf.trace.t.length, inf.skipped], [1, 1])
 })
 
+test('duration units follow the column name', () => {
+  const d = (head: string, v: string) => parseTrace(`timestamp,${head}\n0,${v}\n`).trace.d![0]
+  for (const h of ['latency_us', 'duration_micros', 'durationMicros', 'duration_microseconds', 'latencyUs', 'elapsed_usec', 'duration (us)']) near(d(h, '2000000'), 2, 1e-9, h)
+  for (const h of ['duration_ns', 'durationNanos', 'latency_nanoseconds', 'duration_nano']) near(d(h, '2000000000'), 2, 1e-9, h)
+  for (const h of ['latency_ms', 'durationMs', 'duration_milliseconds', 'LATENCYMS', 'elapsed_msec']) near(d(h, '2000'), 2, 1e-9, h)
+  for (const h of ['duration_s', 'latency_seconds', 'duration_sec']) near(d(h, '2000'), 2000, 1e-9, h)
+  near(d('duration', '2'), 2, 1e-9)
+  near(d('duration', '2000'), 2, 1e-9)
+  const ns = parseTrace('ts,duration_ns\n1763000000000000000,2000000000\n1763000120000000000,1000000000\n')
+  near(ns.trace.t[1], 120, 1e-3)
+  assert.deepEqual(ns.trace.d, [2, 1])
+})
+
+test('unreadable durations are refused or reported, never guessed', () => {
+  for (const text of ['ts;duration\n0;0,5\n1;1,5\n2;2,5\n', 'ts,duration\n0,2 s\n1,3s\n', 'ts,duration\n0,00:01:30\n', 'ts,duration_ms\n0,"1,500"\n1,"2,500"\n', 'ts,duration\n0,-1\n1,-2\n', 'ts,completion_tokens\n0,abc\n']) assert.throws(() => parseTrace(text), /Could not read any durations/, text)
+  assert.throws(() => parseTrace('ts,duration\n0,2\n1,3s\n2,4s\n'), /Could not read most durations/)
+  const some = parseTrace('ts,duration\n0,2\n1,\n2,2\n3,abc\n4,2\n')
+  assert.deepEqual(some.trace.d, [2, 2, 2, 2, 2])
+  assert.match(some.notes.join(' '), /2 of 5 rows have no readable duration: they use the mean of the others/)
+  const few = parseTrace('ts,duration\n0,1\n1,\n2,\n3,\n')
+  assert.equal(few.trace.d, null)
+  assert.match(few.notes.join(' '), /3 of 4 rows.*configured service time/)
+  assert.equal(parseTrace('ts,duration\n0,1\n1,-\n2,N/A\n').trace.d, null)
+  const none = parseTrace('ts,duration\n0,\n1,\n')
+  assert.equal(none.trace.d, null)
+  assert.match(none.notes.join(' '), /"duration" is empty: using the configured service time/)
+})
+
+test('JSON lines: later fields are found and non-object lines are skipped', () => {
+  const r = parseTrace('{"ts":0}\n{"ts":1,"duration":5}\nnull\n[1]\n{"ts":2,"duration":7}\n')
+  assert.deepEqual(r.trace.d, [6, 5, 7])
+  assert.equal(r.skipped, 2)
+})
+
 test('huge logs parse without blowing the call stack', () => {
   const big = Array.from({ length: 200_000 }, (_, i) => String(i)).join('\n')
   assert.equal(parseTrace(big).trace.t.length, 200_000)
