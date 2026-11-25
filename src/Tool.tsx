@@ -222,42 +222,68 @@ export default function Tool() {
     // eslint-disable-next-line
   }, [source, cfg, hydrated])
 
-  // Persist + keep the URL shareable.
+  // Persist + keep the URL shareable. The link carries only a log in use, and only a small one.
   const [shareNote, setShareNote] = useState<string | null>(null)
+  const embeds = (s: Saved) => s.tab === 'upload' && !!s.upload && s.upload.text.length <= MAX_SHARED_TRACE
+  const storable = (s: Saved) => !!s.upload && s.upload.text.length <= MAX_STORED_TRACE
+  const linkFor = async (s: Saved) => {
+    const enc = await encodeState(embeds(s) ? s : { ...s, upload: null, tab: 'synthetic' })
+    return `${location.origin}/app#s=${enc}`
+  }
+  const showLink = (s: Saved, link: string) => {
+    // The lab stays mounted until the next page's code has loaded.
+    if (!onLab()) return
+    const kept: Kept | null = storable(s) && !embeds(s) ? { kept: { tab: s.tab, upload: s.upload } } : null
+    try {
+      history.replaceState(kept, '', link)
+    } catch {
+      history.replaceState(null, '', link)
+    }
+  }
+  // The state on screen, or null once the lab is closed: a link takes a moment to encode.
+  const current = useRef<Saved | null>(state)
+  current.current = state
+  useEffect(() => {
+    current.current = state
+    return () => {
+      current.current = null
+    }
+    // eslint-disable-next-line
+  }, [])
   useEffect(() => {
     if (!hydrated || damaged === state) return
     if (damaged) setDamaged(null)
-    let live = true
     const h = setTimeout(async () => {
-      const storable = !!state.upload && state.upload.text.length <= MAX_STORED_TRACE
       try {
-        localStorage.setItem(STORE, JSON.stringify({ ...state, upload: storable ? state.upload : null, tab: storable ? state.tab : 'synthetic' }))
+        localStorage.setItem(STORE, JSON.stringify(storable(state) ? state : { ...state, upload: null, tab: 'synthetic' }))
       } catch {
         /* Storage full: the session still works, it just will not survive a reload. */
       }
-      const embed = state.upload && state.upload.text.length <= MAX_SHARED_TRACE
-      const enc = await encodeState({ ...state, upload: embed ? state.upload : null, tab: embed ? state.tab : 'synthetic' })
-      // A newer change may have taken over while the link was encoded, or another page: the lab stays mounted until its code loads.
-      if (!live || !onLab()) return
-      const kept: Kept | null = storable && !embed ? { kept: { tab: state.tab, upload: state.upload } } : null
-      try {
-        history.replaceState(kept, '', `/app#s=${enc}`)
-      } catch {
-        history.replaceState(null, '', `/app#s=${enc}`)
-      }
+      const link = await linkFor(state)
+      if (current.current === state) showLink(state, link)
     }, 400)
-    return () => {
-      live = false
-      clearTimeout(h)
-    }
+    return () => clearTimeout(h)
+    // eslint-disable-next-line
   }, [state, hydrated, damaged])
 
+  const noteTimer = useRef(0)
   const share = async () => {
-    if (damaged) return setShareNote('Nothing copied: the address holds a damaged link. Change a setting first.')
-    await navigator.clipboard?.writeText(location.href).catch(() => {})
-    const dropped = tab === 'upload' && upload && upload.text.length > MAX_SHARED_TRACE
-    setShareNote(dropped ? 'Link copied. Your log is too big for a URL, so it carries the settings only.' : 'Link copied.')
-    setTimeout(() => setShareNote(null), 3500)
+    clearTimeout(noteTimer.current)
+    setShareNote(null)
+    const link = await linkFor(state)
+    let copied = true
+    try {
+      // Without a clipboard (an insecure page) this throws too.
+      await navigator.clipboard.writeText(link)
+    } catch {
+      copied = false
+      // So that the address the note points at is this link, also right after an edit.
+      if (current.current === state) showLink(state, link)
+      setDamaged(null)
+    }
+    const log = embeds(state) ? ' It contains your log.' : tab === 'upload' && upload ? ' Your log is too big for a URL, so it carries the settings only.' : ''
+    setShareNote((copied ? 'Link copied.' : 'Not copied: use the address bar.') + log)
+    noteTimer.current = window.setTimeout(() => setShareNote(null), copied ? 3500 : 15_000)
   }
 
   // ---- Optimizer: own worker so the main sim stays responsive and it can be cancelled.
@@ -549,7 +575,7 @@ export default function Tool() {
             <button className="btn btn-ghost btn-sm" onClick={saveScenario} disabled={!r}>
               Save scenario
             </button>
-            <button className="btn btn-primary btn-sm" onClick={share}>
+            <button className="btn btn-primary btn-sm" onClick={share} disabled={!hydrated}>
               Copy share link
             </button>
           </div>

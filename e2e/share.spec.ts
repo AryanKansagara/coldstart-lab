@@ -47,7 +47,7 @@ test('hostile values in a link are forced into range and shown as text', async (
   await expect(page.locator('img[src="x"]')).toHaveCount(0)
 })
 
-test.fail('#10: the link leaves out a log that is not the one on screen', async ({ page }) => {
+test('#10: the link leaves out a log that is not the one on screen', async ({ page }) => {
   await openLogs(page, HAND_CFG)
   await pasteLog(page, 'timestamp,duration_s,user\n0,2,someone@example.com\n')
   await page.getByRole('tab', { name: 'Generate' }).click()
@@ -58,7 +58,7 @@ test.fail('#10: the link leaves out a log that is not the one on screen', async 
   expect((await decodeLink(page, await copied(page))).upload).toBeNull()
 })
 
-test.fail('#10: a link copied right after an edit carries the edit', async ({ page }) => {
+test('#10: a link copied right after an edit carries the edit', async ({ page }) => {
   await openLogs(page, HAND_CFG)
   await page.waitForTimeout(800)
   // Edit and click back to back inside the page, so a slow machine cannot hide the gap.
@@ -73,7 +73,7 @@ test.fail('#10: a link copied right after an edit carries the edit', async ({ pa
   expect((await decodeLink(page, await copied(page))).cfg.minContainers).toBe(1)
 })
 
-test.fail('#10: a refused clipboard is not reported as copied', async ({ page }) => {
+test('#10: a refused clipboard is not reported as copied', async ({ page }) => {
   await openLogs(page, HAND_CFG)
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) }, configurable: true }))
   await page.getByRole('button', { name: 'Copy share link' }).click()
@@ -124,3 +124,41 @@ test('#11: the damaged link stays in the address and is never copied, until a ch
   await expect.poll(() => page.url()).not.toContain('AAAA-cut-off')
   expect((await decodeLink(page, page.url())).cfg.bootSec).toBe(4)
 })
+
+test('#10: a hidden log survives a reload though the link leaves it out', async ({ page }) => {
+  await openLogs(page, HAND_CFG)
+  await pasteLog(page, LOG)
+  await page.getByRole('tab', { name: 'Generate' }).click()
+  await settled(page)
+  await page.waitForTimeout(800)
+  expect((await decodeLink(page, page.url())).upload).toBeNull()
+  await page.reload()
+  await settled(page)
+  await expect(page.getByRole('tab', { name: 'Generate' })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('tab', { name: 'Your logs' }).click()
+  await expect(page.locator('.drop b')).toHaveText('pasted log')
+})
+
+test('#10: the note says when the link contains the log', async ({ page }) => {
+  await openLogs(page, HAND_CFG)
+  await pasteLog(page, LOG)
+  const share = page.getByRole('button', { name: 'Copy share link' })
+  await share.click()
+  await expect(page.locator('.lab-top .micro')).toHaveText('Link copied. It contains your log.')
+  expect((await decodeLink(page, await copied(page))).upload.text).toBe(LOG)
+  await page.getByRole('tab', { name: 'Generate' }).click()
+  await share.click()
+  await expect(page.locator('.lab-top .micro')).toHaveText('Link copied.')
+})
+
+for (const [name, clipboard] of [['refused', 'denied'], ['missing', undefined]] as const)
+  test(`#10: with the clipboard ${name}, the address bar holds the current link and the note says so`, async ({ page }) => {
+    await openLogs(page, HAND_CFG)
+    await pasteLog(page, LOG)
+    await page.waitForTimeout(800)
+    await page.evaluate((c) => Object.defineProperty(navigator, 'clipboard', { value: c && { writeText: () => Promise.reject(new Error(c)) }, configurable: true }), clipboard)
+    await page.getByLabel('boot').fill('4')
+    await page.getByRole('button', { name: 'Copy share link' }).click()
+    await expect(page.locator('.lab-top .micro')).toHaveText('Not copied: use the address bar. It contains your log.')
+    expect((await decodeLink(page, page.url())).cfg.bootSec).toBe(4)
+  })
