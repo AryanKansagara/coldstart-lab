@@ -101,7 +101,10 @@ export function sanitizeSpec(raw: Partial<TrafficSpec> | null | undefined, base:
 
 // ---------- parsing user logs ----------
 
-const TIME_KEYS = ['timestamp', 'time', 'ts', 'start', 'start_time', 'started_at', 'created_at', 'arrival', 'enqueued_at', 'date']
+const TIME_KEYS = ['timestamp', 'time', 'ts', 'start', 'start_time', 'started_at', 'created_at', 'arrival', 'enqueued_at', 'date', 'epoch', 'offset', 't', 'tsms', 'when', 'unix', 'received_at', 'logged_at', 'updated_at', 'started', 'created', 'arrived', 'requested_at', 'submitted_at', 'invoked_at']
+// Names that contain a time word but hold a duration or something else.
+const NOT_TIME_RE =
+  /(^|_)((execution|exec|response|processing|service|wait|queue|inference|total|cold|warm|up|down|life|handling|compute|cpu|gpu)_?time|(cold|warm)_?start|run_?time|time_?(taken|out|zone|spent))|sentiment/
 const END_KEYS = ['end_timestamp', 'end_time', 'ended_at', 'finished_at', 'completed_at', 'end_ts']
 const DUR_KEYS = ['duration', 'latency', 'execution_time', 'exec_time', 'runtime', 'elapsed', 'duration_ms', 'latency_ms', 'duration_s', 'execution_ms']
 const IN_TOK_KEYS = ['contexttokens', 'prompt_tokens', 'input_tokens', 'context_tokens']
@@ -122,18 +125,23 @@ export interface ParseResult {
 // ISO-like date-times, with a space or T and any number of fraction digits (Azure exports use 7).
 const ISO_RE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(?:[.,](\d+))?\s*(Z|[+-]\d{2}:?\d{2}| ?UTC)?$/i
 
+const MONTHS = 'jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?'
+// What Date.parse may be trusted with: it also turns "Product 1" and "A-1" into dates.
+const DATE_RE = new RegExp(`^(\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}|\\d{1,2}/\\d{1,2}/\\d{2,4}|\\d{1,2}[-.]\\d{1,2}[-.]\\d{4})(?![\\d./-])|\\b(${MONTHS})\\b.*\\d{4}|\\d{4}.*\\b(${MONTHS})\\b|\\d[ -](${MONTHS})[ -]\\d{2}`, 'i')
+
 function toSeconds(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   if (typeof v !== 'string') return null
   const s = v.trim()
   if (s === '') return null
-  if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s)) return Number(s)
+  if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(s)) return Number.isFinite(Number(s)) ? Number(s) : null
   const m = ISO_RE.exec(s)
   if (m) {
     const zone = !m[4] ? '' : /utc/i.test(m[4]) ? 'Z' : m[4].length === 5 ? `${m[4].slice(0, 3)}:${m[4].slice(3)}` : m[4]
     const base = Date.parse(`${m[1]}T${m[2].length === 5 ? `${m[2]}:00` : m[2]}${zone}`)
     return Number.isNaN(base) ? null : base / 1000 + (m[3] ? Number(`0.${m[3]}`) : 0)
   }
+  if (!DATE_RE.test(s)) return null
   const ms = Date.parse(s)
   return Number.isNaN(ms) ? null : ms / 1000
 }
@@ -149,6 +157,37 @@ function pickKey(keys: string[], wanted: string[], exclude: string[] = []) {
     if (i >= 0) return keys[i]
   }
   return null
+}
+
+const snake = (k: string) => k.trim().replace(/([a-z])([A-Z])/g, '$1_$2').replace(/[\s.-]+/g, '_').toLowerCase()
+
+/** The arrival (or completion) column, or null when nothing in the file says when requests happened. */
+function pickTime(keys: string[], rows: Record<string, unknown>[], durationKey: string | null): { key: string; isEnd: boolean } | null {
+  const names = keys.map(snake)
+  const at = (test: (n: string) => boolean) => names.findIndex((n, i) => keys[i] !== durationKey && !NOT_TIME_RE.test(n) && test(n))
+  // "send_time" and "backend_timestamp" are not end times.
+  const isEndName = (n: string) => END_KEYS.some((w) => n === w || `_${n}`.includes(`_${w}`))
+  const end = [...END_KEYS.map((w) => at((n) => n === w)), at(isEndName)].find((i) => i >= 0) ?? -1
+  const tries = [
+    ...TIME_KEYS.map((w) => (n: string) => n === w),
+    // Short words hide inside others ("attempts", "restarts", "update_count"), so they must stand alone.
+    ...TIME_KEYS.map((w) => (n: string) => (w === 'time' || w === 'timestamp' ? n.includes(w) : w !== 't' && `_${n}_`.includes(`_${w}_`))),
+  ]
+  for (const test of tries) {
+    const i = at((n) => !isEndName(n) && test(n))
+    if (i >= 0) return { key: keys[i], isEnd: false }
+  }
+  if (end >= 0) return { key: keys[end], isEnd: true }
+  // Unknown names: take the first column that can only be a time (a date, or a clock-sized number that is not an id).
+  const sample = rows.slice(0, 50)
+  const isClock = (v: unknown) => {
+    const s = toSeconds(v)
+    if (s === null) return false
+    if (typeof v === 'string' && !/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(v.trim())) return true
+    return [1, 1e3, 1e6, 1e9].some((k) => s >= 1.2e9 * k && s < 2.2e9 * k)
+  }
+  const i = keys.findIndex((k, j) => k !== durationKey && !/(^|_)id$/.test(names[j]) && sample.filter((r) => isClock(r[k])).length * 2 > sample.length)
+  return i >= 0 ? { key: keys[i], isEnd: false } : null
 }
 
 /** RFC 4180-style split of one line: quoted fields may hold separators and doubled quotes. */
@@ -215,10 +254,10 @@ export function parseTrace(text: string): ParseResult {
     }
   }
 
-  const ek = pickKey(keys, END_KEYS)
-  const tk = pickKey(keys, TIME_KEYS, ek ? [ek.toLowerCase().trim()] : []) ?? ek ?? keys[0]
-  const fromEnd = tk === ek
   const dk = pickKey(keys, DUR_KEYS)
+  const time = pickTime(keys, rows, dk)
+  if (!time) throw new Error(`No time column found (columns: ${keys.slice(0, 8).join(', ').slice(0, 200)}). Name the column that says when each request arrived "timestamp".`)
+  const { key: tk, isEnd: fromEnd } = time
   const ik = dk ? null : pickKey(keys, IN_TOK_KEYS)
   const ok = dk ? null : pickKey(keys, OUT_TOK_KEYS)
   const rowDur = (row: Record<string, unknown>): number | null => {
