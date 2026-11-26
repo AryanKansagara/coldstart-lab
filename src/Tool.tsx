@@ -37,6 +37,13 @@ function clean(raw: Partial<Saved> | null): Saved {
   }
 }
 
+/** A log the address bar link leaves out stays with this history entry, so a reload finds it and nobody else's link does. */
+interface Kept {
+  kept: Pick<Saved, 'tab' | 'upload'>
+}
+const onLab = () => /^\/app(\/|$)/.test(location.pathname)
+const keptLog = () => (history.state as Partial<Kept> | null)?.kept
+
 function initial(): Saved {
   const q = new URLSearchParams(location.search).get('sample')
   const sample = SAMPLE_TRAFFIC.find((s) => s.id === q)
@@ -148,7 +155,7 @@ export default function Tool() {
   useEffect(() => {
     if (hydrated) return
     decodeState<Partial<Saved>>(location.hash).then((d) => {
-      if (d) setState(clean(d))
+      if (d) setState(clean({ ...d, ...keptLog() }))
       setHydrated(true)
     })
     // eslint-disable-next-line
@@ -211,17 +218,29 @@ export default function Tool() {
   const [shareNote, setShareNote] = useState<string | null>(null)
   useEffect(() => {
     if (!hydrated) return
+    let live = true
     const h = setTimeout(async () => {
+      const storable = !!state.upload && state.upload.text.length <= MAX_STORED_TRACE
       try {
-        localStorage.setItem(STORE, JSON.stringify({ ...state, upload: state.upload && state.upload.text.length <= MAX_STORED_TRACE ? state.upload : null, tab: state.upload && state.upload.text.length <= MAX_STORED_TRACE ? state.tab : 'synthetic' }))
+        localStorage.setItem(STORE, JSON.stringify({ ...state, upload: storable ? state.upload : null, tab: storable ? state.tab : 'synthetic' }))
       } catch {
         /* Storage full: the session still works, it just will not survive a reload. */
       }
       const embed = state.upload && state.upload.text.length <= MAX_SHARED_TRACE
       const enc = await encodeState({ ...state, upload: embed ? state.upload : null, tab: embed ? state.tab : 'synthetic' })
-      history.replaceState(null, '', `/app#s=${enc}`)
+      // A newer change may have taken over while the link was encoded, or another page: the lab stays mounted until its code loads.
+      if (!live || !onLab()) return
+      const kept: Kept | null = storable && !embed ? { kept: { tab: state.tab, upload: state.upload } } : null
+      try {
+        history.replaceState(kept, '', `/app#s=${enc}`)
+      } catch {
+        history.replaceState(null, '', `/app#s=${enc}`)
+      }
     }, 400)
-    return () => clearTimeout(h)
+    return () => {
+      live = false
+      clearTimeout(h)
+    }
   }, [state, hydrated])
 
   const share = async () => {
