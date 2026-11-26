@@ -333,3 +333,35 @@ test('every request that arrived before its container was ready is a cold hit', 
   // Queued behind a warm container only: not cold.
   assert.equal(simulate(tr([0, 0, 0]), cfg({ minContainers: 1, maxContainers: 1 })).coldCount, 0)
 })
+
+const cutLog = (last: string, full = '2026-10-12T14:00:05Z') => parseTrace(`timestamp,duration_s\n${full},2\n${full},2\n${last}`)
+
+test('a last row cut off inside its timestamp is skipped and counted, wherever it was cut', () => {
+  for (const full of ['2026-10-12T14:00:05Z', '2026-10-12 14:00:05.123+05:30', '2026-10-12 14:00:05 UTC', '10/12/2026 2:00:05 PM'])
+    for (let k = 1; k < full.length; k++) {
+      const { trace, skipped } = cutLog(full.slice(0, k), full)
+      assert.equal(trace.horizon, 60, `${full.slice(0, k)} of ${full}`)
+      assert.equal(trace.t.length + skipped, 3)
+    }
+})
+
+test('a bare date is skipped anywhere in a log of date-times, also in JSON lines', () => {
+  const r = parseTrace('timestamp,duration_s\n2026-10-12T14:00:00Z,2\n2026-10-12,2\n2026-10-12T14:00:05Z,2')
+  assert.deepEqual([r.trace.t.length, r.trace.horizon, r.skipped], [2, 60, 1])
+  const j = parseTrace('{"ts":"2026-10-12T14:00:05Z"}\n{"ts":"2026-10-12"}\n{"ts":"2026-10-12T14:00:07Z"}')
+  assert.deepEqual([j.trace.t.length, j.skipped], [2, 1])
+})
+
+test('logs of plain dates, plain numbers and mixed precision keep every row', () => {
+  for (const log of [
+    'timestamp,duration_s\n2026-10-10,2\n2026-10-11,2\n2026-10-12',
+    'timestamp,duration_s\n2026-10-10,2\n2026-10-11,2\n2026-10-12T14:00:00Z,2',
+    'timestamp\n2026-10-10\n2026-10-9\n2026-10-8',
+    'timestamp\n1.25\n2.5\n9.9',
+    'timestamp\n2026-10-12T14:00:05.123456\n2026-10-12T14:00:06.5\n2026-10-12T14:00:07',
+    'timestamp,duration_s\n2026-10-12T14:00:05Z,2\n2026-10-12T14:00:06Z,2\n2026-10-12T16:00:07+02:00',
+  ]) {
+    const { trace, skipped } = parseTrace(log)
+    assert.deepEqual([trace.t.length, skipped], [3, 0], log)
+  }
+})

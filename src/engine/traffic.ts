@@ -146,6 +146,19 @@ function toSeconds(v: unknown): number | null {
   return Number.isNaN(ms) ? null : ms / 1000
 }
 
+/** A date without a time of day, in any layout toSeconds() reads. */
+const isBareDate = (v: unknown) => typeof v === 'string' && DATE_RE.test(v.trim()) && !/\d:\d/.test(v)
+
+/** True when `v` is the start of a time written like `like`, missing its time of day, seconds or zone: it would read as another moment. */
+function isCutTime(v: unknown, like: unknown) {
+  if (typeof v !== 'string' || typeof like !== 'string' || !/\d:\d{2}/.test(like) || !DATE_RE.test(like.trim())) return false
+  if (!/\d:\d{2}/.test(v)) return true
+  if (/\d:\d{2}:\d{2}/.test(like) && !/\d:\d{2}:\d{2}/.test(v)) return true
+  const zone = (s: string) => s.trim().replace(/^.*?\d:\d{2}(:\d{2}([.,]\d+)?)?/, '').trim().replace(/\d/g, '9')
+  const [a, b] = [zone(v), zone(like)]
+  return a.length < b.length && b.startsWith(a)
+}
+
 function pickKey(keys: string[], wanted: string[], exclude: string[] = []) {
   const lower = keys.map((k) => k.toLowerCase().trim())
   for (const w of wanted) {
@@ -233,6 +246,7 @@ export function parseTrace(text: string): ParseResult {
   const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter((l) => l.trim() !== '')
   if (lines.length === 0) throw new Error('The log is empty.')
   let rows: Record<string, unknown>[] = []
+  let lastCell: string | null = null
   let skipped = 0
   const notes: string[] = []
 
@@ -253,10 +267,12 @@ export function parseTrace(text: string): ParseResult {
     const header = hasHeader ? first : first.map((_, i) => (i === 0 ? 'timestamp' : i === 1 ? 'duration' : `c${i}`))
     for (const l of lines.slice(hasHeader ? 1 : 0)) {
       const cells = splitCsvLine(l, sep)
+      lastCell = header[cells.length - 1] ?? null
       rows.push(Object.fromEntries(header.map((h, i) => [h, cells[i]])))
     }
   }
   if (rows.length === 0) throw new Error('No parseable rows found.')
+  const lastRow = rows[rows.length - 1]
 
   const keys = Object.keys(rows[0])
   // Each Modal Function autoscales on its own, so a multi-function log is narrowed to its busiest function.
@@ -294,11 +310,16 @@ export function parseTrace(text: string): ParseResult {
     if (out === null || inp === null) return null
     return LLM_OVERHEAD_SEC + inp / PREFILL_TOK_PER_SEC + out / DECODE_TOK_PER_SEC
   }
+  // In a log of date-times, a bare date is a timestamp cut short: it would read as midnight, hours away.
+  const bare = rows.filter((r) => isBareDate(r[tk])).length
+  const timed = rows.filter((r) => typeof r[tk] === 'string' && DATE_RE.test(r[tk].trim()) && !isBareDate(r[tk])).length
+  // A file that ends inside its last timestamp may still leave something readable, such as a date-time without its zone.
+  const prev = rows.length > 1 && rows[rows.length - 1] === lastRow && lastCell === tk ? rows[rows.length - 2][tk] : null
   let garbled = 0
   const pairs: [number, number | null][] = []
   for (const row of rows) {
     const ts = toSeconds(row[tk])
-    if (ts === null) {
+    if (ts === null || (timed > bare && isBareDate(row[tk])) || (row === lastRow && isCutTime(row[tk], prev))) {
       skipped++
       continue
     }
